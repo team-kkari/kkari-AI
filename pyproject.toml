@@ -1,0 +1,23 @@
+[project]
+name = "kkari-ai"
+version = "0.1.0"
+description = "AWS Best Practice docs collector for RAG"
+readme = "README.md"
+authors = [
+    { name = "woo-rin", email = "dlqk091028@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=2.4.0",
+    "beautifulsoup4>=4.15.0",
+    "fastapi>=0.162.0",
+    "markdownify>=1.2.3",
+    "numpy>=2.4.6",
+    "rank-bm25>=0.2.2",
+    "requests>=2.34.2",
+    "sentence-transformers>=6.2.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[tool.uv]
+package = false
