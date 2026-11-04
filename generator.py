@@ -19,6 +19,23 @@ from pydantic import BaseModel, Field
 from retriever import Retriever
 
 RESOURCE_CATEGORIES = ["compute", "database", "network", "container", "serverless"]
+# 인프라 설명을 리소스 단위로 자르는 기준: 줄바꿈, 문장 끝, 쉼표(숫자 안의 쉼표 "$4,200" 은 제외)
+SEGMENT_SPLIT = re.compile(r"\n|(?<=[.。;])\s+|,(?!\d)|，|、")
+# 인프라 설명에 실제로 나온 서비스 계열만 검색 범위에 넣는다 (EC2 만 있는데 EKS 문서가 쏟아지는 것 방지)
+RESOURCE_KEYWORDS = {
+    "compute": r"\bec2\b|\bebs\b|\basg\b|auto ?scaling|오토\s?스케일|인스턴스|instance|gp[23]|\bspot\b|스팟",
+    "database": r"\brds\b|aurora|dynamodb|elasticache|redis|memcached|\bdax\b|데이터베이스|\bdb\b",
+    "network": r"\bnat\b|\bvpc\b|\balb\b|\belb\b|\bnlb\b|cloudfront|route ?53|transit|데이터 ?전송|data transfer|서브넷|subnet",
+    "container": r"\becs\b|\beks\b|fargate|kubernetes|\bk8s\b|컨테이너|container|docker",
+    "serverless": r"lambda|람다|api gateway|step functions|서버리스|serverless",
+}
+
+
+def resource_categories(infra: str) -> list[str]:
+    """인프라 설명에 언급된 리소스 계열. 하나도 못 찾으면 전체."""
+    # re.A: \b 를 ASCII 기준으로 → "RDS를", "EC2는" 처럼 조사가 붙어도 매칭
+    found = [c for c, pat in RESOURCE_KEYWORDS.items() if re.search(pat, infra, re.I | re.A)]
+    return found or RESOURCE_CATEGORIES
 
 # ───────────────────────── 출력 스키마 (프론트에서 그대로 렌더링) ─────────────────────────
 
@@ -145,27 +162,36 @@ class RAG:
 
         전체 설명을 한 번에 검색하면 임베딩이 평균화돼서 NAT·EBS 같은 개별 리소스 문서가 빠진다.
         """
-        segments = [s.strip(" -•,") for s in re.split(r"\n|(?<=[.。;])\s+", infra)]
+        segments = [s.strip(" -•,") for s in SEGMENT_SPLIT.split(infra)]
         segments = [s for s in segments if len(s) >= 4][:10]
         lists = [self.retriever.search(f"{goal} {p}".strip(), k=4, categories=[p])
                  for p in (priorities or [])]
         # 리소스 구간은 우선순위 방향 + 리소스 계열 안에서만 (모니터링·알람 문서 등 잡음 방지)
-        seg_cats = list(dict.fromkeys((priorities or []) + RESOURCE_CATEGORIES)) if priorities else None
+        seg_cats = (list(dict.fromkeys(priorities + resource_categories(infra)))
+                    if priorities else None)
         lists += [self.retriever.search(f"{s} {goal}".strip(), k=3, categories=seg_cats) for s in segments]
         if not lists:
             lists = [self.retriever.search(goal or infra, k=k)]
 
-        hits, seen, per_doc = [], set(), {}
+        # 같은 문서의 청크는 한 출처로 합친다 (출처 목록에 같은 URL 이 두 번 나오지 않게)
+        hits, seen, by_doc, per_doc = [], set(), {}, {}
         for rank in range(max(len(l) for l in lists)):  # 라운드로빈: 각 질의의 1위부터
             for l in lists:
-                if rank >= len(l) or len(hits) >= k:
+                if rank >= len(l):
                     continue
                 h = l[rank]
                 if h["id"] in seen or per_doc.get(h["doc_id"], 0) >= 2:
                     continue
+                if h["doc_id"] in by_doc:
+                    merged = by_doc[h["doc_id"]]
+                    merged["text"] += "\n\n…\n\n" + h["text"]
+                elif len(hits) < k:
+                    by_doc[h["doc_id"]] = h = dict(h)
+                    hits.append(h)
+                else:
+                    continue
                 seen.add(h["id"])
                 per_doc[h["doc_id"]] = per_doc.get(h["doc_id"], 0) + 1
-                hits.append(h)
         return hits
 
     def recommend(self, infra: str, goal: str = "", priorities: list[str] | None = None,
