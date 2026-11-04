@@ -1,0 +1,5 @@
+{
+  "model": "intfloat/multilingual-e5-small",
+  "dim": 384,
+  "count": 4417
+}

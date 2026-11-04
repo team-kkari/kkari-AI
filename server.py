@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.parse
 
+import anthropic
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -64,11 +66,28 @@ def search(req: SearchReq):
                         for r, h in zip(source_refs(hits), hits)]}
 
 
+def _need_llm():
+    """LLM 이 필요한 엔드포인트에서 키가 없으면 500 대신 원인을 알려준다."""
+    if os.environ.get("LLM_BACKEND", "claude") == "claude" and not (
+            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        raise HTTPException(503, "ANTHROPIC_API_KEY 가 설정되지 않았습니다. "
+                                 "PowerShell 에서 setx ANTHROPIC_API_KEY \"sk-ant-...\" 후 창을 새로 열고 서버를 재시작하세요.")
+
+
 @app.post("/recommend")
 def recommend(req: RecommendReq):
     _check(req.priorities)
+    _need_llm()
     try:
         return rag.recommend(req.infra, req.goal, req.priorities)
+    except anthropic.AuthenticationError:
+        raise HTTPException(502, "Claude API 키가 유효하지 않습니다")
+    except anthropic.RateLimitError:
+        raise HTTPException(429, "Claude API 사용량 한도 초과 — 잠시 후 다시 시도")
+    except anthropic.APIStatusError as e:
+        raise HTTPException(502, f"Claude API 오류 ({e.status_code}): {e.message}")
+    except anthropic.APIConnectionError:
+        raise HTTPException(502, "Claude API 에 연결할 수 없습니다 (네트워크 확인)")
     except RuntimeError as e:
         raise HTTPException(502, str(e))
 
@@ -76,6 +95,7 @@ def recommend(req: RecommendReq):
 @app.post("/chat")
 def chat(req: ChatReq):
     _check(req.categories)
+    _need_llm()
     sources, stream = rag.chat_stream(req.question, req.history, req.categories)
     return StreamingResponse(stream, media_type="text/plain; charset=utf-8",
                              headers={"X-Sources": urllib.parse.quote(json.dumps(sources, ensure_ascii=False))})

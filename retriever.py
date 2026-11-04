@@ -1,4 +1,4 @@
-"""하이브리드 검색기: 벡터(bge-m3) + BM25 키워드, RRF 로 합침.
+"""하이브리드 검색기: 벡터(multilingual-e5) + BM25 키워드, RRF 로 합침.
 
     from retriever import Retriever
     r = Retriever()
@@ -17,7 +17,8 @@ from pathlib import Path
 import numpy as np
 
 INDEX = Path(__file__).parent / "data" / "index"
-DEFAULT_MODEL = "BAAI/bge-m3"
+# 기본: 가볍고(470MB) 다국어 지원. 네트워크·디스크 여유가 있으면 "BAAI/bge-m3"(2.2GB) 로 재빌드 가능
+DEFAULT_MODEL = "intfloat/multilingual-e5-small"
 TOKEN = re.compile(r"[a-z0-9][a-z0-9\-\.]*", re.I)
 
 CATEGORIES = ["cost", "performance", "reliability", "security", "operations", "sustainability",
@@ -34,7 +35,14 @@ def load_encoder(model: str):
         device = "mps"
     else:
         device = "cpu"
-    return SentenceTransformer(model, device=device)
+    local = Path(__file__).parent / "models" / model.split("/")[-1]  # download_model.py 로 받은 것
+    return SentenceTransformer(str(local) if (local / "model.safetensors").exists() else model,
+                               device=device)
+
+
+def prefixes(model: str) -> tuple[str, str]:
+    """(query 프리픽스, passage 프리픽스). e5 계열은 필수, bge-m3 등은 불필요."""
+    return ("query: ", "passage: ") if "e5" in model.lower() else ("", "")
 
 
 def tokenize(text: str) -> list[str]:
@@ -50,6 +58,7 @@ class Retriever:
         self.emb = np.load(index_dir / "embeddings.npy").astype(np.float32)
         assert len(self.chunks) == len(self.emb), "인덱스와 청크 수가 다름 — build_index.py 재실행"
         self.encoder = load_encoder(meta["model"])
+        self.qprefix, _ = prefixes(meta["model"])
         self.bm25 = BM25Okapi([tokenize(c["embed_text"]) for c in self.chunks])
         self.cat = np.array([c["category"] for c in self.chunks])
 
@@ -60,12 +69,11 @@ class Retriever:
         if not mask.any():
             return []
 
-        # bge-m3 는 쿼리에 별도 프리픽스 불필요
-        q = self.encoder.encode([query], normalize_embeddings=True, convert_to_numpy=True)[0]
+        q = self.encoder.encode([self.qprefix + query], normalize_embeddings=True, convert_to_numpy=True)[0]
         dense = self.emb @ q
         dense[~mask] = -np.inf
         sparse = np.asarray(self.bm25.get_scores(tokenize(query)), dtype=np.float32)
-        sparse[~mask] = -np.inf
+        sparse[~mask | (sparse <= 0)] = -np.inf  # 키워드가 하나도 안 맞으면 순위에서 제외 (한글만 있는 질문 등)
 
         # Reciprocal Rank Fusion
         rrf = np.zeros(len(self.chunks), np.float32)

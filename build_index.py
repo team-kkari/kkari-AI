@@ -1,6 +1,6 @@
 """chunks.jsonl → 임베딩 인덱스 (data/index/).
 
-    uv run python build_index.py [--model BAAI/bge-m3] [--batch 32]
+    uv run python build_index.py [--model intfloat/multilingual-e5-small] [--batch 32]
 
 산출물 (OS 무관, 그대로 Windows 로 복사 가능):
     data/index/embeddings.npy   float16 (N, dim), L2 정규화됨
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from retriever import DEFAULT_MODEL, INDEX, load_encoder
+from retriever import DEFAULT_MODEL, INDEX, load_encoder, prefixes
 
 DATA = Path(__file__).parent / "data"
 
@@ -29,7 +29,8 @@ def main():
     args = ap.parse_args()
 
     chunks = [json.loads(l) for l in (DATA / "chunks.jsonl").open(encoding="utf-8")]
-    texts = [c["embed_text"] for c in chunks]
+    _, pprefix = prefixes(args.model)
+    texts = [pprefix + c["embed_text"] for c in chunks]
     print(f"{len(texts)} chunks, model={args.model}")
 
     enc = load_encoder(args.model)
