@@ -7,11 +7,13 @@
     POST /search     검색만 (API 키 불필요) — 근거 자료 확인/디버깅용
     POST /recommend  인프라 정보 → 구조화된 솔루션(JSON) + 출처
     POST /chat       챗봇 — 스트리밍 텍스트. 출처는 X-Sources 헤더(JSON, URL 인코딩)
+    POST /intake     초기 상담 인터뷰 — 챗봇이 질문하며 요구사항 프로필을 채움, 완료 시 /recommend 요청 데이터
 """
 from __future__ import annotations
 
 import json
 import os
+import threading
 import urllib.parse
 
 import anthropic
@@ -21,12 +23,27 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from generator import RAG, source_refs
+from intake import WARMUP, Intake
 from retriever import CATEGORIES
 
 app = FastAPI(title="AWS Best Practice RAG")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
                    expose_headers=["X-Sources"])
 rag = RAG()  # 시작 시 인덱스·임베딩 모델 로드 (수십 초)
+
+
+def _warmup():
+    """구조화 출력은 스키마를 처음 쓸 때 수십 초~1분 넘게 걸린다(이후 캐시돼 수 초).
+    고객이 처음 보는 상담 첫 턴이 느리지 않도록 서버 시작 시 백그라운드로 한 번 호출해 둔다."""
+    try:
+        Intake(rag.llm).turn([], "", session_id=WARMUP)
+        print("[warmup] /intake 준비 완료", flush=True)
+    except Exception as e:  # noqa: BLE001 — 워밍업 실패는 서비스에 영향 없음
+        print(f"[warmup] 건너뜀: {type(e).__name__}", flush=True)
+
+
+if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+    threading.Thread(target=_warmup, daemon=True).start()
 
 
 class SearchReq(BaseModel):
@@ -45,6 +62,13 @@ class ChatReq(BaseModel):
     question: str
     history: list[dict] = Field(default_factory=list, description='이전 턴 [{"role":"user"|"assistant","content":"..."}]')
     categories: list[str] | None = None
+
+
+class IntakeReq(BaseModel):
+    history: list[dict] = Field(default_factory=list,
+                                description='지금까지 대화 [{"role":"assistant"|"user","content":"..."}]. 첫 턴은 빈 목록')
+    infra_context: str = Field("", description="백엔드가 자동 수집한 인프라 요약 (있으면 이건 다시 묻지 않음)")
+    session_id: str | None = Field(None, description="대화 로그 묶음용 ID (프론트에서 생성)")
 
 
 def _check(cats):
@@ -74,12 +98,11 @@ def _need_llm():
                                  "PowerShell 에서 setx ANTHROPIC_API_KEY \"sk-ant-...\" 후 창을 새로 열고 서버를 재시작하세요.")
 
 
-@app.post("/recommend")
-def recommend(req: RecommendReq):
-    _check(req.priorities)
+def _call_llm(fn, *args):
+    """Claude API 오류를 원인별 HTTP 응답으로 변환."""
     _need_llm()
     try:
-        return rag.recommend(req.infra, req.goal, req.priorities)
+        return fn(*args)
     except anthropic.AuthenticationError:
         raise HTTPException(502, "Claude API 키가 유효하지 않습니다")
     except anthropic.RateLimitError:
@@ -90,6 +113,20 @@ def recommend(req: RecommendReq):
         raise HTTPException(502, "Claude API 에 연결할 수 없습니다 (네트워크 확인)")
     except RuntimeError as e:
         raise HTTPException(502, str(e))
+
+
+@app.post("/recommend")
+def recommend(req: RecommendReq):
+    _check(req.priorities)
+    return _call_llm(rag.recommend, req.infra, req.goal, req.priorities)
+
+
+@app.post("/intake")
+def intake(req: IntakeReq):
+    bad = [m for m in req.history if m.get("role") not in ("user", "assistant") or not isinstance(m.get("content"), str)]
+    if bad:
+        raise HTTPException(400, 'history 각 항목은 {"role": "user"|"assistant", "content": "..."} 형식이어야 합니다')
+    return _call_llm(lambda: Intake(rag.llm).turn(req.history, req.infra_context, req.session_id))
 
 
 @app.post("/chat")

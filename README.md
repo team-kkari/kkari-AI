@@ -12,7 +12,8 @@ chunk.py        섹션 단위 청크 분할                        → data/chun
 build_index.py  multilingual-e5-small 임베딩 인덱스 생성    → data/index/
 retriever.py    하이브리드 검색 (벡터 + BM25, 카테고리 필터)
 generator.py    Claude 로 솔루션/답변 생성 (LLM 교체 가능한 인터페이스)
-server.py       FastAPI: /search, /recommend, /chat
+intake.py       초기 상담 인터뷰 챗봇 (질문하며 요구사항 프로필 수집)
+server.py       FastAPI: /intake, /recommend, /chat, /search
 eval_search.py  검색 품질 스모크 테스트
 download_model.py 임베딩 모델 이어받기 다운로더 → models/
 ```

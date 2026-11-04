@@ -48,7 +48,8 @@ class Solution(BaseModel):
 
 class LLM(Protocol):
     def stream_text(self, system: str, messages: list[dict]) -> Iterator[str]: ...
-    def structured(self, system: str, user: str, schema: type[BaseModel]) -> BaseModel: ...
+    def structured(self, system: str, user: str, schema: type[BaseModel],
+                   effort: str = "high") -> BaseModel: ...
 
 
 class ClaudeLLM:
@@ -72,11 +73,12 @@ class ClaudeLLM:
         if final.stop_reason == "refusal":
             yield "\n\n(요청이 모델 정책에 의해 거절되었습니다. 질문을 바꿔 다시 시도해 주세요.)"
 
-    def structured(self, system, user, schema):
+    def structured(self, system, user, schema, effort="high"):
+        """effort: 솔루션 생성은 high, 상담 질문처럼 빨라야 하는 건 low."""
         resp = self.client.beta.messages.parse(
             model=self.MODEL, max_tokens=16000, system=system,
             messages=[{"role": "user", "content": user}],
-            output_format=schema, output_config={"effort": "high"}, **self.FALLBACK,
+            output_format=schema, output_config={"effort": effort}, **self.FALLBACK,
         )
         if resp.stop_reason == "refusal":
             raise RuntimeError("모델이 요청을 거절했습니다")

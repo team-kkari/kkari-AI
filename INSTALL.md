@@ -103,6 +103,39 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 { "query": "EC2 CPU 사용률이 낮은데 비용 줄이는 법", "k": 5, "categories": ["cost"] }
 ```
 
+### `POST /intake` — 초기 상담 인터뷰 챗봇 (챗봇이 질문)
+
+고객(인프라 전문가)에게 챗봇이 1~2개씩 질문하며 요구사항을 모은다. 서버는 상태를 저장하지 않으므로 **매 턴 대화 기록 전체를 보낸다.**
+
+```jsonc
+// 첫 턴: history 비움 → 인사 + 첫 질문
+{ "history": [], "infra_context": "(백엔드가 수집한 인프라 요약, 없으면 빈 문자열)", "session_id": "uuid" }
+
+// 다음 턴: 직전 상담원 메시지 + 고객 답변을 붙여서 다시 호출
+{ "history": [
+    {"role": "assistant", "content": "(직전 reply)"},
+    {"role": "user", "content": "B2C 이커머스, MAU 80만입니다"}
+  ], "infra_context": "...", "session_id": "uuid" }
+```
+
+응답:
+
+```jsonc
+{
+  "reply": "확인했습니다. 이어서 ... 피크 RPS 는 어느 정도인가요?",   // 채팅창에 표시
+  "quick_replies": ["평시 일정, 세일 때 3~5배", "저녁 피크, RPS 모름"],  // 버튼으로 표시
+  "profile": { "workload": "...", "traffic": null, "priorities": ["cost"], ... },  // 모은 정보
+  "missing": ["가용성 목표", "변경 허용 범위"],   // 아직 못 모은 필수 항목
+  "ready": false,
+  "recommend_request": null   // ready=true 가 되면 {infra, goal, priorities} → 그대로 /recommend 에 POST
+}
+```
+
+- 흐름: `/intake` 반복 → `ready: true` → `recommend_request` 를 `/recommend` 로 보내 솔루션 생성
+- `infra_context` 로 넘긴 정보는 다시 묻지 않고, 그걸 근거로 더 깊게 묻는다
+- 한 턴 약 4~10초. 서버 시작 직후 첫 호출이 느린 것을 막으려고 시작 시 백그라운드 워밍업을 1회 한다
+- 대화·프로필은 `data/intake_logs/날짜.jsonl` 에 쌓인다 (git 미포함, 추후 분석/학습용)
+
 ### `POST /recommend` — 인프라 정보 → 솔루션(JSON)
 
 ```json

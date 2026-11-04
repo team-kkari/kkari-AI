@@ -4,3 +4,4 @@ data/raw/
 data/collect.log
 .env
 models/
+data/intake_logs/
