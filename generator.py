@@ -11,11 +11,14 @@ LLM 은 `LLM` 인터페이스 뒤에 숨겨져 있다. 지금은 ClaudeLLM, 나�
 from __future__ import annotations
 
 import os
+import re
 from typing import Iterator, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
 from retriever import Retriever
+
+RESOURCE_CATEGORIES = ["compute", "database", "network", "container", "serverless"]
 
 # ───────────────────────── 출력 스키마 (프론트에서 그대로 렌더링) ─────────────────────────
 
@@ -136,22 +139,38 @@ class RAG:
             self._llm = get_llm()
         return self._llm
 
-    def gather(self, query: str, priorities: list[str] | None = None, k: int = 12) -> list[dict]:
-        """우선순위 카테고리별로 나눠 검색 후 합침 → 한 방향에 근거가 쏠리지 않게."""
-        hits, seen = [], set()
-        groups = [[p] for p in (priorities or [])] + [None]
-        per = max(3, k // len(groups))
-        for cats in groups:
-            for h in self.retriever.search(query, k=per, categories=cats):
-                if h["id"] not in seen:
-                    seen.add(h["id"])
-                    hits.append(h)
-        return hits[:k]
+    def gather(self, infra: str, goal: str = "", priorities: list[str] | None = None,
+               k: int = 16) -> list[dict]:
+        """인프라 설명을 리소스 단위로 쪼개 각각 검색 + 우선순위 방향별 검색 → 번갈아 합침.
+
+        전체 설명을 한 번에 검색하면 임베딩이 평균화돼서 NAT·EBS 같은 개별 리소스 문서가 빠진다.
+        """
+        segments = [s.strip(" -•,") for s in re.split(r"\n|(?<=[.。;])\s+", infra)]
+        segments = [s for s in segments if len(s) >= 4][:10]
+        lists = [self.retriever.search(f"{goal} {p}".strip(), k=4, categories=[p])
+                 for p in (priorities or [])]
+        # 리소스 구간은 우선순위 방향 + 리소스 계열 안에서만 (모니터링·알람 문서 등 잡음 방지)
+        seg_cats = list(dict.fromkeys((priorities or []) + RESOURCE_CATEGORIES)) if priorities else None
+        lists += [self.retriever.search(f"{s} {goal}".strip(), k=3, categories=seg_cats) for s in segments]
+        if not lists:
+            lists = [self.retriever.search(goal or infra, k=k)]
+
+        hits, seen, per_doc = [], set(), {}
+        for rank in range(max(len(l) for l in lists)):  # 라운드로빈: 각 질의의 1위부터
+            for l in lists:
+                if rank >= len(l) or len(hits) >= k:
+                    continue
+                h = l[rank]
+                if h["id"] in seen or per_doc.get(h["doc_id"], 0) >= 2:
+                    continue
+                seen.add(h["id"])
+                per_doc[h["doc_id"]] = per_doc.get(h["doc_id"], 0) + 1
+                hits.append(h)
+        return hits
 
     def recommend(self, infra: str, goal: str = "", priorities: list[str] | None = None,
-                  k: int = 12) -> dict:
-        query = f"{goal}\n{infra}"[:2000]
-        hits = self.gather(query, priorities, k)
+                  k: int = 16) -> dict:
+        hits = self.gather(infra, goal, priorities, k)
         user = (f"<현재_인프라>\n{infra}\n</현재_인프라>\n\n"
                 f"<원하는_방향>\n{goal or '(명시 안 됨)'}\n</원하는_방향>\n\n"
                 f"<우선순위>{', '.join(priorities or []) or '(없음)'}</우선순위>\n\n"
