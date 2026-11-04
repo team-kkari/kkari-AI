@@ -31,6 +31,29 @@ RESOURCE_KEYWORDS = {
 }
 
 
+MAX_SEGMENTS = 16
+HEADER = re.compile(r"^\[[^\]]*\]$")            # "[자동 수집]", "[상담 내용]" 같은 머리글
+LABEL = re.compile(r"^[^:：]{1,12}[:：]\s*")     # "트래픽: ..." 의 "트래픽: "
+
+
+def segment_infra(infra: str) -> list[str]:
+    """인프라 설명 → 리소스/사실 단위 검색 질의 목록.
+
+    /intake 의 recommend_request 는 [자동 수집] 과 [상담 내용] 이 같은 사실을 반복하는 경우가 많아서
+    머리글은 빼고, 라벨·기호를 무시한 내용이 같으면 한 번만 남긴다 (중복이 앞자리를 차지해
+    상담에서 새로 얻은 트래픽·가용성 같은 정보가 잘려 나가지 않게).
+    """
+    out, seen = [], set()
+    for s in SEGMENT_SPLIT.split(infra):
+        s = s.strip(" -•,")
+        key = re.sub(r"[\W_]+", "", LABEL.sub("", s)).lower()
+        if len(s) < 4 or HEADER.match(s) or key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out[:MAX_SEGMENTS]
+
+
 def resource_categories(infra: str) -> list[str]:
     """인프라 설명에 언급된 리소스 계열. 하나도 못 찾으면 전체."""
     # re.A: \b 를 ASCII 기준으로 → "RDS를", "EC2는" 처럼 조사가 붙어도 매칭
@@ -164,8 +187,7 @@ class RAG:
 
         전체 설명을 한 번에 검색하면 임베딩이 평균화돼서 NAT·EBS 같은 개별 리소스 문서가 빠진다.
         """
-        segments = [s.strip(" -•,") for s in SEGMENT_SPLIT.split(infra)]
-        segments = [s for s in segments if len(s) >= 4][:10]
+        segments = segment_infra(infra)
         lists = [self.retriever.search(f"{goal} {p}".strip(), k=4, categories=[p])
                  for p in (priorities or [])]
         # 리소스 구간은 우선순위 방향 + 리소스 계열 안에서만 (모니터링·알람 문서 등 잡음 방지)
