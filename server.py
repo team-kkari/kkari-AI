@@ -8,6 +8,7 @@
     POST /recommend  인프라 정보 → 구조화된 솔루션(JSON) + 출처
     POST /chat       챗봇 — 스트리밍 텍스트. 출처는 X-Sources 헤더(JSON, URL 인코딩)
     POST /intake     초기 상담 인터뷰 — 챗봇이 질문하며 요구사항 프로필을 채움, 완료 시 /recommend 요청 데이터
+    POST /architectures  추천 아키텍처 5개 — AI 순위·점수·장단점·월 비용·설계도 좌표 (1~3분)
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from architect import Architect
 from generator import RAG, source_refs
 from intake import WARMUP, Intake
 from retriever import CATEGORIES
@@ -39,7 +41,12 @@ def _warmup():
         Intake(rag.llm).turn([], "", session_id=WARMUP)
         print("[warmup] /intake 준비 완료", flush=True)
     except Exception as e:  # noqa: BLE001 — 워밍업 실패는 서비스에 영향 없음
-        print(f"[warmup] 건너뜀: {type(e).__name__}", flush=True)
+        print(f"[warmup] /intake 건너뜀: {type(e).__name__}", flush=True)
+    try:  # /architectures 스키마 4종도 미리 컴파일 (첫 요청이 수 분 걸리는 것 방지)
+        Architect(rag, n=1).run("EC2 t4g.small 1대", "워밍업", [])
+        print("[warmup] /architectures 준비 완료", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[warmup] /architectures 건너뜀: {type(e).__name__}", flush=True)
 
 
 if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
@@ -56,6 +63,10 @@ class RecommendReq(BaseModel):
     infra: str = Field(description="현재 인프라 요약 (리소스 목록, CloudWatch 사용률, 비용 등 — 텍스트나 JSON 문자열)")
     goal: str = Field("", description="사용자가 원하는 구조/목표")
     priorities: list[str] = Field(default_factory=list, description="우선 최적화 방향, 예: ['cost', 'performance']")
+
+
+class ArchitecturesReq(RecommendReq):
+    count: int = Field(5, description="추천 개수 (1~5)")
 
 
 class ChatReq(BaseModel):
@@ -119,6 +130,14 @@ def _call_llm(fn, *args):
 def recommend(req: RecommendReq):
     _check(req.priorities)
     return _call_llm(rag.recommend, req.infra, req.goal, req.priorities)
+
+
+@app.post("/architectures")
+def architectures(req: ArchitecturesReq):
+    _check(req.priorities)
+    if not 1 <= req.count <= 5:
+        raise HTTPException(400, "count 는 1~5")
+    return _call_llm(Architect(rag, n=req.count).run, req.infra, req.goal, req.priorities)
 
 
 @app.post("/intake")

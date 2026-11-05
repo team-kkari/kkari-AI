@@ -1,0 +1,555 @@
+{
+ "name": "3-Tier Web (Multi-AZ, ASG)",
+ "concept": "웹/앱/DB 3계층을 2개 AZ에 이중화하고 CloudFront·WAF로 앞단을 보호",
+ "easy_explanation": "서버를 두 군데 데이터센터(AZ)에 나눠 두어 한쪽이 멈춰도 서비스가 계속 돌아갑니다. 사용자가 몰리면 서버 수가 자동으로 늘어납니다.",
+ "pros": [
+  "AZ 장애에도 서비스 유지",
+  "트래픽에 따라 서버 자동 증감",
+  "정적 파일은 CloudFront가 캐시해 서버 부하 감소"
+ ],
+ "cons": [
+  "NAT Gateway·ALB가 2중이라 고정비가 높음",
+  "EC2 운영(패치·AMI 관리) 부담이 남음"
+ ],
+ "migration_steps": [
+  "AMI 생성 후 Launch Template 작성",
+  "ASG를 2개 AZ로 구성",
+  "RDS Multi-AZ 전환(재부팅 1회)",
+  "CloudFront·WAF 연결"
+ ],
+ "diagram": {
+  "zones": [
+   "AZ1",
+   "AZ2"
+  ],
+  "tiers": [
+   {
+    "id": "public",
+    "label": "Public subnet",
+    "kind": "public"
+   },
+   {
+    "id": "web",
+    "label": "Web subnet",
+    "kind": "private"
+   },
+   {
+    "id": "app",
+    "label": "App subnet",
+    "kind": "private"
+   },
+   {
+    "id": "db",
+    "label": "DB subnet",
+    "kind": "private"
+   }
+  ],
+  "nodes": [
+   {
+    "id": "users",
+    "icon": "users",
+    "label": "Users",
+    "role": "www / media.example.com",
+    "place": "outside",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "free"
+    }
+   },
+   {
+    "id": "r53",
+    "icon": "route53",
+    "label": "Amazon Route 53",
+    "role": "DNS service",
+    "place": "edge",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 1,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 50,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "route53"
+    }
+   },
+   {
+    "id": "waf_cf",
+    "icon": "waf",
+    "label": "AWS WAF",
+    "role": "Web Application Firewall",
+    "place": "edge",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 1,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 30,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 5,
+     "kind": "waf"
+    }
+   },
+   {
+    "id": "cf",
+    "icon": "cloudfront",
+    "label": "Amazon CloudFront",
+    "role": "CDN",
+    "place": "edge",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 2000,
+     "requests_million_month": 30,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "cloudfront"
+    }
+   },
+   {
+    "id": "waf_alb",
+    "icon": "waf",
+    "label": "AWS WAF",
+    "role": "Web Application Firewall",
+    "place": "edge",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 1,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 20,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 5,
+     "kind": "waf"
+    }
+   },
+   {
+    "id": "shield",
+    "icon": "shield",
+    "label": "AWS Shield",
+    "role": "DDoS protection",
+    "place": "edge",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "free"
+    }
+   },
+   {
+    "id": "s3",
+    "icon": "s3",
+    "label": "Amazon S3",
+    "role": "Static storage and backup",
+    "place": "region",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "standard",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 500,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "s3"
+    }
+   },
+   {
+    "id": "efs",
+    "icon": "efs",
+    "label": "Amazon EFS",
+    "role": "Shared storage",
+    "place": "region",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "standard",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 100,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "efs"
+    }
+   },
+   {
+    "id": "cache",
+    "icon": "elasticache",
+    "label": "Amazon ElastiCache",
+    "role": "Caching service",
+    "place": "region",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "cache.r7g.large",
+     "engine": "Valkey",
+     "multi_az": false,
+     "count": 2,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "elasticache"
+    }
+   },
+   {
+    "id": "nat",
+    "icon": "nat_gateway",
+    "label": "NAT gateway",
+    "role": "",
+    "place": "subnet",
+    "tier": "public",
+    "zone": "each",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 2,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 300,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "nat_gateway"
+    }
+   },
+   {
+    "id": "alb_web",
+    "icon": "alb",
+    "label": "Elastic Load Balancing",
+    "role": "",
+    "place": "subnet",
+    "tier": "public",
+    "zone": "span",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 1,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 5,
+     "kind": "alb"
+    }
+   },
+   {
+    "id": "web",
+    "icon": "ec2",
+    "label": "EC2 Instances",
+    "role": "Web servers",
+    "place": "subnet",
+    "tier": "web",
+    "zone": "each",
+    "group": "asg_web",
+    "pricing": {
+     "spec": "m7g.large",
+     "engine": "",
+     "multi_az": false,
+     "count": 4,
+     "hours_per_month": 730,
+     "storage_gb": 30,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "ec2"
+    }
+   },
+   {
+    "id": "alb_app",
+    "icon": "alb",
+    "label": "Elastic Load Balancing",
+    "role": "",
+    "place": "subnet",
+    "tier": "app",
+    "zone": "span",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 1,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 3,
+     "kind": "alb"
+    }
+   },
+   {
+    "id": "app",
+    "icon": "ec2",
+    "label": "EC2 Instances",
+    "role": "App servers",
+    "place": "subnet",
+    "tier": "app",
+    "zone": "each",
+    "group": "asg_app",
+    "pricing": {
+     "spec": "m7g.xlarge",
+     "engine": "",
+     "multi_az": false,
+     "count": 4,
+     "hours_per_month": 730,
+     "storage_gb": 50,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "ec2"
+    }
+   },
+   {
+    "id": "rds",
+    "icon": "rds",
+    "label": "Amazon RDS",
+    "role": "Database (primary / secondary)",
+    "place": "subnet",
+    "tier": "db",
+    "zone": "each",
+    "group": "dbsg",
+    "pricing": {
+     "spec": "db.r6g.xlarge",
+     "engine": "MySQL",
+     "multi_az": true,
+     "count": 1,
+     "hours_per_month": 730,
+     "storage_gb": 500,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "rds"
+    }
+   },
+   {
+    "id": "dto",
+    "icon": "internet",
+    "label": "Data transfer out",
+    "role": "인터넷 송신",
+    "place": "outside",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 1000,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "data_transfer_out"
+    }
+   }
+  ],
+  "groups": [
+   {
+    "id": "asg_web",
+    "kind": "auto_scaling",
+    "label": "Auto Scaling group · Web tier"
+   },
+   {
+    "id": "asg_app",
+    "kind": "auto_scaling",
+    "label": "Auto Scaling group · App tier"
+   },
+   {
+    "id": "dbsg",
+    "kind": "db_subnet_group",
+    "label": "DB subnet group"
+   }
+  ],
+  "edges": [
+   {
+    "source": "users",
+    "target": "r53",
+    "label": ""
+   },
+   {
+    "source": "r53",
+    "target": "cf",
+    "label": "media.example.com"
+   },
+   {
+    "source": "r53",
+    "target": "waf_alb",
+    "label": "www.example.com"
+   },
+   {
+    "source": "waf_cf",
+    "target": "cf",
+    "label": ""
+   },
+   {
+    "source": "cf",
+    "target": "alb_web",
+    "label": ""
+   },
+   {
+    "source": "waf_alb",
+    "target": "alb_web",
+    "label": ""
+   },
+   {
+    "source": "alb_web",
+    "target": "web",
+    "label": ""
+   },
+   {
+    "source": "web",
+    "target": "s3",
+    "label": ""
+   },
+   {
+    "source": "web",
+    "target": "alb_app",
+    "label": ""
+   },
+   {
+    "source": "alb_app",
+    "target": "app",
+    "label": ""
+   },
+   {
+    "source": "app",
+    "target": "efs",
+    "label": ""
+   },
+   {
+    "source": "app",
+    "target": "cache",
+    "label": ""
+   },
+   {
+    "source": "app",
+    "target": "rds",
+    "label": ""
+   }
+  ]
+ },
+ "sources": [],
+ "bp_ids": [
+  "REL10-BP01",
+  "PERF04-BP03"
+ ]
+}
