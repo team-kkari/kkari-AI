@@ -98,7 +98,7 @@ SOLUTION = Solution(summary="요약", current_assessment="평가", recommendatio
 def llm_profile(**kw) -> ProfileLLM:
     """Claude 출력 형식(null 없음)의 빈 프로필. 모르는 값 = "" / -1 / "unknown"."""
     base = {k: "" for k, f in ProfileLLM.model_fields.items() if f.annotation is str}
-    base.update(monthly_budget=-1, currency="unknown", contains_personal_data="unknown", frozen_status="unknown",
+    base.update(monthly_budget=-1, contains_personal_data="unknown", frozen_status="unknown",
                 frozen_resources=[], priorities=[])
     base.update(kw)
     return ProfileLLM(**base)

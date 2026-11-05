@@ -30,13 +30,14 @@ def test_budget_none_or_zero(c):
     assert budget_usd(c) is None
 
 
-def test_budget_without_currency_not_guessed():
-    """통화가 없으면 USD 로 추측하지 않는다 (원화 300만 원이 $3,000,000 으로 읽히는 것 방지)."""
-    c = Constraints(monthly_budget=3_000_000)
-    assert budget_usd(c) is None
-    assert violations(draft_with(), cost(10**7), c) == []
-    assert "통화 미확인" in constraints_text(c) and "USD" not in constraints_text(c)
-    assert constraint_warnings(c) and constraint_warnings(Constraints(monthly_budget=1, currency="USD")) == []
+def test_budget_is_usd_by_default():
+    """금액은 USD 로 통일: currency 가 없으면 USD, KRW 는 하위 호환으로 환산. 프롬프트에는 달러로만 쓴다."""
+    c = Constraints(monthly_budget=3000)
+    assert budget_usd(c) == 3000 and constraint_warnings(c) == []
+    assert violations(draft_with(), cost(3500), c)[0]["constraint"] == "monthly_budget"
+    assert constraints_text(c) == "- 월 예산: $3,000"
+    krw = Constraints(monthly_budget=4_200_000, currency="KRW")
+    assert budget_usd(krw) == 3000 and constraints_text(krw) == "- 월 예산: $3,000" and "원" not in constraints_text(krw)
 
 
 # ───────────────────────── violations ─────────────────────────

@@ -7,7 +7,7 @@ from consult import (ConsultProfileLLM, ConsultTurn, FileAnalysis, analyze_files
 
 def prof(**kw) -> ConsultProfileLLM:
     base = dict(concern="", desired_outcomes=[], priority_order=[], budget_stance="not_asked", monthly_budget=-1,
-                currency="unknown", service_description="", architecture_type="not_asked", daily_users="not_asked",
+                service_description="", architecture_type="not_asked", daily_users="not_asked",
                 traffic_pattern="", outage_impact="not_asked", recovery_target="", personal_data="not_asked",
                 sensitive_data="", compliance="", frozen_status="not_asked", frozen_resources=[], change_tolerance=[],
                 change_asked=False, operator="not_asked", aws_connection="not_asked")
@@ -16,7 +16,7 @@ def prof(**kw) -> ConsultProfileLLM:
 
 
 FULL = dict(concern="요금이 많이 나와요", desired_outcomes=["cost", "reliability"], priority_order=["cost", "reliability"],
-            budget_stance="amount", monthly_budget=300000, currency="KRW", service_description="꽃집 주문 사이트",
+            budget_stance="amount", monthly_budget=200, service_description="꽃집 주문 사이트",
             outage_impact="minor", personal_data="yes", sensitive_data="이름·전화번호", aws_connection="later")
 
 
@@ -30,7 +30,8 @@ def test_required_questions_and_conditionals():
     assert "Q9-1" in missing(prof(**{**FULL, "outage_impact": "major"}), "required")
     assert "Q9-1" not in missing(prof(**{**FULL, "outage_impact": "major", "recovery_target": "1시간"}), "required")
     # Q4: 금액을 정했다면 금액·통화까지
-    assert not filled(prof(budget_stance="amount", monthly_budget=300000))["Q4"]
+    assert not filled(prof(budget_stance="amount"))["Q4"]          # 금액을 정했다면 금액까지
+    assert filled(prof(budget_stance="amount", monthly_budget=200))["Q4"]
     assert filled(prof(budget_stance="reduce"))["Q4"]
 
 
@@ -48,7 +49,7 @@ def test_to_public_turns_sentinels_into_null():
         assert pub[k] is None, k
     pub = prof(**FULL, frozen_status="none", change_asked=True, architecture_type="unknown").to_public()
     assert pub["contains_personal_data"] is True and pub["frozen_resources"] == [] and pub["change_tolerance"] == []
-    assert pub["architecture_type"] == "unknown" and pub["currency"] == "KRW"
+    assert pub["architecture_type"] == "unknown" and pub["currency"] == "USD" and pub["monthly_budget"] == 200
 
 
 def test_recommend_request_for_architectures():
@@ -56,7 +57,7 @@ def test_recommend_request_for_architectures():
                 "monthly_cost_usd": 245.0}
     req = to_recommend_request(prof(**FULL, frozen_status="listed", frozen_resources=["주문 DB"]), analysis)
     assert req["priorities"] == ["cost", "reliability"]
-    assert req["constraints"] == {"monthly_budget": 300000, "currency": "KRW", "contains_personal_data": True,
+    assert req["constraints"] == {"monthly_budget": 200, "currency": "USD", "contains_personal_data": True,
                                   "frozen_resources": ["주문 DB"]}
     assert req["current_monthly_usd"] == 245.0
     assert "[업로드 파일 분석]" in req["infra"] and "꽃집 주문 사이트" in req["infra"]

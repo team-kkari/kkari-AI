@@ -118,8 +118,8 @@ class Diagram(BaseModel):
 
 class Constraints(BaseModel):
     """/intake 의 recommend_request.constraints 와 같은 형식. 모두 선택."""
-    monthly_budget: float | None = Field(None, description="월 예산. 0 = 정해진 예산 없음, null = 모름")
-    currency: Literal["USD", "KRW"] | None = Field(None, description="monthly_budget 통화")
+    monthly_budget: float | None = Field(None, description="월 예산 (USD). 0 = 정해진 예산 없음, null = 모름")
+    currency: Literal["USD", "KRW"] | None = Field(None, description="monthly_budget 통화. 금액은 USD 로 통일 — 생략하면 USD (KRW 는 하위 호환용, 환산해서 사용)")
     contains_personal_data: bool | None = Field(None, description="개인정보 저장·처리 여부")
     frozen_resources: list[str] | None = Field(None, description="변경하면 안 되는 리소스")
     krw_per_usd: float = Field(1400, description="currency=KRW 일 때 쓰는 환율 (원/달러)")

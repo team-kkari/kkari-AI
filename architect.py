@@ -26,6 +26,7 @@ from errors import ApiError, classify
 from generator import RAG, format_sources, source_refs
 from layout import layout
 from schemas import ArchitectureDraft, Constraints, CurrentInfra
+from textfmt import OUTPUT_RULES, plain_tree
 
 log = logging.getLogger("kkari")
 REGION = "ap-northeast-2"
@@ -79,7 +80,7 @@ class Ranking(BaseModel):
 # ───────────────────────── 프롬프트 ─────────────────────────
 
 COMMON = """너는 AWS 솔루션 아키텍트다. 고객(인프라 전문가)이 맡긴 인프라를 보고 추천 아키텍처를 설계한다.
-제공된 AWS 공식 Best Practice <자료> 를 근거로 삼는다. 모든 설명은 한국어, AWS 서비스명·설정값은 영어 그대로."""
+제공된 AWS 공식 Best Practice <자료> 를 근거로 삼는다. 모든 설명은 한국어, AWS 서비스명·설정값은 영어 그대로.""" + OUTPUT_RULES
 
 SYSTEM_DIRECTIONS = COMMON + """
 지금은 서로 확실히 다른 설계 방향 {n}개만 정한다.
@@ -142,10 +143,9 @@ SYSTEM_RANK = COMMON + """
 
 
 def budget_usd(c: Constraints | None) -> float | None:
-    """월 예산을 USD 로. 예산 없음(0)·모름(None)·통화 미확인이면 None (예산 검사 생략).
-
-    통화 없이 금액만 오면 원화 300만 원이 $3,000,000 으로 읽히는 식의 오판이 생기므로 추측하지 않는다."""
-    if not c or not c.monthly_budget or c.currency is None:
+    """월 예산을 USD 로. 예산 없음(0)·모름(None)이면 None (예산 검사 생략).
+    금액은 USD 로 통일했으므로 currency 가 없으면 USD 로 본다. KRW 로 오면(하위 호환) 환산한다."""
+    if not c or not c.monthly_budget:
         return None
     return c.monthly_budget / c.krw_per_usd if c.currency == "KRW" else c.monthly_budget
 
@@ -154,12 +154,8 @@ def constraints_text(c: Constraints | None) -> str:
     if c is None:
         return ""
     lines = []
-    if c.monthly_budget and c.currency is None:
-        lines.append(f"- 월 예산: {c.monthly_budget:,.0f} (통화 미확인 — 원화인지 달러인지 모름)")
-    elif c.monthly_budget:
-        usd = budget_usd(c)
-        lines.append(f"- 월 예산: {c.monthly_budget:,.0f} {c.currency}"
-                     + (f" (약 ${usd:,.0f}, 환율 {c.krw_per_usd:,.0f}원/$)" if c.currency == "KRW" else ""))
+    if c.monthly_budget:
+        lines.append(f"- 월 예산: ${budget_usd(c):,.0f}")
     elif c.monthly_budget == 0:
         lines.append("- 월 예산: 정해진 상한 없음")
     if c.contains_personal_data is not None:
@@ -196,9 +192,7 @@ def region_warnings(infra: str) -> list[str]:
 
 
 def constraint_warnings(c: Constraints | None) -> list[str]:
-    if c and c.monthly_budget and c.currency is None:
-        return ["월 예산의 통화(currency: USD|KRW)가 없어 예산 초과 검사를 하지 않았습니다."]
-    return []
+    return []  # 금액은 USD 로 통일 — currency 가 없어도 USD 로 보고 검사한다
 
 
 def _distinct(dirs: list[Direction], n: int) -> list[Direction]:
@@ -352,8 +346,14 @@ class Architect:
                 "layout": c["layout"].model_dump(),
             })
         pricing = load_pricing(REGION)
+        # 설명 문장의 마크다운 기호 제거 (layout·diagram·cost 의 숫자는 그대로)
+        for arch in architectures:
+            for k in ("rank_reason", "best_for", "name", "concept", "easy_explanation", "pros", "cons",
+                      "migration_steps", "signature_changes", "violations"):
+                arch[k] = plain_tree(arch[k])
+        ranking_overall = plain_tree(ranking.overall) if ranking else ""
         return {
-            "overall": ranking.overall if ranking else "",
+            "overall": ranking_overall,
             "current": {"monthly_usd": round(baseline, 2) if baseline else None,
                         "source": baseline_source,
                         "estimated_cost": est_cost.model_dump() if est_cost else None,

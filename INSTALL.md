@@ -99,6 +99,10 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 
 ## API 요약 (백엔드 연동용)
 
+> **출력 규칙 (모든 AI 응답 공통)**: 마크다운을 쓰지 않는 **일반 텍스트**다 (`**`, `#`, 백틱 없음, 목록은 줄바꿈 + `- `). 화면에 그대로 출력하면 된다.
+> **금액은 모두 달러($)** 다. 고객이 원화로 말해도 1달러 = 1,400원으로 환산해 달러로만 답하고, `monthly_budget` 도 USD 로 저장된다.
+
+
 ### `POST /search` — 근거 자료 검색만 (API 키 불필요)
 
 ```json
@@ -177,7 +181,7 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 
 - 흐름: `/intake` 반복 → `ready: true` → `recommend_request` 를 `/architectures` 로 보내 추천 생성
 - profile 의 `company_name`(고객사명)은 기본 필수 항목이라 첫 질문에서 함께 묻는다 (첫 입력에 있으면 자동 추출)
-- profile 의 제약 필드 (타입 고정): `monthly_budget`(number, 0=예산 없음), `currency`(`USD`|`KRW`), `contains_personal_data`(bool),
+- profile 의 제약 필드 (타입 고정): `monthly_budget`(USD, 0=예산 없음), `currency`(예산이 있으면 항상 `USD`), `contains_personal_data`(bool),
   `frozen_resources`(string[], `[]`=없음). null 은 아직 모름
 - 요청에 `required_fields: ["workload", "monthly_budget", ...]` 를 주면 필수 질문 목록을 바꿀 수 있다. 응답 `missing_fields` 는 영문 키
 - `infra_context` 로 넘긴 정보는 다시 묻지 않고, 그걸 근거로 더 깊게 묻는다

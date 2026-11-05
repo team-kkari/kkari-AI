@@ -12,9 +12,9 @@ def test_budget_zero_is_filled():
     assert is_filled(Profile(monthly_budget=0), "monthly_budget")  # 0 = 정해진 예산 없음
 
 
-def test_budget_without_currency_is_missing():
-    assert not is_filled(Profile(monthly_budget=3_000_000), "monthly_budget")
-    assert is_filled(Profile(monthly_budget=3_000_000, currency="KRW"), "monthly_budget")
+def test_budget_amount_is_filled_without_currency():
+    """예산은 USD 로 통일 → 금액만 있으면 채워진 것."""
+    assert is_filled(Profile(monthly_budget=3000), "monthly_budget")
 
 
 def test_budget_none_is_missing():
@@ -106,10 +106,10 @@ def test_llm_profile_to_profile_converts_sentinels():
                     priorities=["cost", "nope"]).to_profile()
     assert p.workload == "쇼핑몰" and p.monthly_budget == 0 and p.contains_personal_data is False
     assert p.frozen_resources == [] and p.priorities == ["cost"]
-    p = llm_profile(monthly_budget=5_000_000, currency="KRW", contains_personal_data="yes", frozen_status="listed",
+    p = llm_profile(monthly_budget=3570, contains_personal_data="yes", frozen_status="listed",
                     frozen_resources=["RDS prod-db MySQL 8.0"]).to_profile()
     assert (p.monthly_budget, p.currency, p.contains_personal_data, p.frozen_resources) == \
-        (5_000_000, "KRW", True, ["RDS prod-db MySQL 8.0"])
+        (3570, "USD", True, ["RDS prod-db MySQL 8.0"])
 
 
 def test_company_name_is_required_first_and_mapped():
