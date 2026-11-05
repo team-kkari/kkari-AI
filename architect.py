@@ -15,6 +15,8 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from cost import estimate
@@ -25,9 +27,20 @@ from schemas import ArchitectureDraft, CurrentInfra
 # ───────────────────────── Claude 출력 스키마 (B 내부용) ─────────────────────────
 
 
+Axis = Literal["rightsize_current", "containers", "serverless", "managed_data", "network_edge",
+               "high_availability", "minimum_cost"]
+AXIS_LABEL = {"rightsize_current": "현 구조 적정화", "containers": "컨테이너 전환", "serverless": "서버리스 전환",
+              "managed_data": "데이터 계층 관리형 전환", "network_edge": "네트워크·엣지 최적화",
+              "high_availability": "고가용성 강화", "minimum_cost": "최저 비용"}
+
+
 class Direction(BaseModel):
-    title: str = Field(description="방향 이름 (예: '현 구조 최적화 + Graviton', '컨테이너(ECS Fargate) 전환')")
+    axis: Axis = Field(description="이 방향의 설계 축. 후보끼리 겹치지 않게 서로 다른 값")
+    title: str = Field(description="방향 이름 (예: '현 구조 적정화 + Savings Plans', '컨테이너(ECS Fargate) 전환')")
     idea: str = Field(description="핵심 아이디어 2문장: 무엇을 바꾸고 왜 고객에게 맞을 수 있는지")
+    signature_changes: list[str] = Field(description=(
+        "이 안에서만 쓰는 대표 변경 2~3개 (예: 'Graviton(m7g) 전환', 'ECS Fargate', 'Aurora Serverless v2'). "
+        "다른 후보의 signature_changes 와 하나도 겹치면 안 된다"))
 
 
 class Directions(BaseModel):
@@ -63,8 +76,12 @@ COMMON = """너는 AWS 솔루션 아키텍트다. 고객(인프라 전문가)이
 SYSTEM_DIRECTIONS = COMMON + """
 지금은 서로 확실히 다른 설계 방향 {n}개만 정한다.
 - 고객의 우선순위와 변경 허용 범위(다운타임, 관리형/서버리스 전환 가능 여부)를 지킨다. 허용 안 된 전환은 넣지 않는다.
-- 서로 겹치지 않게: 예) 현 구조 최적화(라이트사이징·Graviton·약정) / 컨테이너 전환 / 서버리스 / 고가용성 강화 / 최저비용.
-- 첫 번째는 현재 구조를 크게 바꾸지 않는 보수적인 안으로 한다."""
+- 후보마다 axis 가 달라야 하고, signature_changes(그 안만의 대표 변경)는 후보끼리 하나도 겹치면 안 된다.
+  예) Graviton 전환을 한 후보의 signature 로 쓰면 다른 후보는 Graviton 을 쓰지 않는다. Savings Plans·Spot·Aurora·
+  CloudFront·Auto Scaling 같은 단골 개선도 한 후보에게만 배정한다.
+- 결과적으로 비용·성능·안정성·운영 부담·전환 난이도의 장단점이 후보마다 확실히 갈리게 한다
+  (예: 가장 싼 안, 가장 안정적인 안, 가장 쉬운 안, 장기적으로 가장 현대적인 안).
+- 첫 번째는 axis=rightsize_current 로 현재 구조를 크게 바꾸지 않는 보수적인 안으로 한다."""
 
 SYSTEM_DRAFT = COMMON + """
 주어진 <방향> 하나를 구체적인 아키텍처로 설계한다.
@@ -88,7 +105,13 @@ SYSTEM_DRAFT = COMMON + """
 
 [코멘트 규칙]
 - easy_explanation 은 비전공자도 이해하게 비유 없이 쉬운 말로. pros/cons 는 이 고객 상황 기준으로 구체적으로 (수치 인용).
-- 근거로 쓴 자료 번호를 sources 에, BP ID 를 bp_ids 에."""
+- 근거로 쓴 자료 번호를 sources 에, BP ID 를 bp_ids 에.
+
+[차별화 규칙] — 고객은 5개 안을 나란히 비교한다
+- <다른_후보> 의 대표 변경(signature)은 이 안에 넣지 않는다 (예: 다른 후보가 'Graviton 전환'이면 이 안은 현재
+  인스턴스 패밀리 계열을 유지하거나 이 방향에 맞는 다른 선택을 한다).
+- 단, 고객의 필수 요구(가용성 목표·규제)를 못 지키게 되면 최소한으로만 쓰고 cons 에 그 사실을 적는다.
+- name 과 pros/cons 는 이 안의 대표 변경을 중심으로 쓴다."""
 
 SYSTEM_CURRENT = COMMON + """
 고객의 현재 인프라를 비용 계산용 노드 목록으로 옮긴다 (설계 변경 없이 있는 그대로).
@@ -101,6 +124,20 @@ SYSTEM_RANK = COMMON + """
 - 고객 우선순위를 가장 크게 반영하고, 변경 허용 범위·제약(규제, 다운타임)을 어기는 안은 순위를 낮춘다.
 - 점수는 후보끼리 상대 비교로 매긴다 (모두 같은 점수 금지). rank 는 1부터 겹치지 않게.
 - 이유는 계산된 월 비용과 현재 대비 증감을 숫자로 인용한다."""
+
+
+def _distinct(dirs: list[Direction], n: int) -> list[Direction]:
+    """axis 나 대표 변경이 겹치는 방향은 뒤로 미룬다 (모델이 규칙을 어긴 경우 대비). 개수가 모자라면 미룬 것으로 채움."""
+    out, rest, axes, sigs = [], [], set(), set()
+    for d in dirs:
+        keys = {s.strip().lower() for s in d.signature_changes}
+        if d.axis in axes or keys & sigs:
+            rest.append(d)
+            continue
+        out.append(d)
+        axes.add(d.axis)
+        sigs |= keys
+    return (out + rest)[:n]
 
 
 def _block(tag: str, body: str) -> str:
@@ -129,11 +166,15 @@ class Architect:
         timings["search"] = time.time() - t0
 
         dirs: Directions = self.llm.structured(SYSTEM_DIRECTIONS.format(n=self.n), ctx, Directions, effort="low")
-        directions = dirs.directions[: self.n]
+        directions = _distinct(dirs.directions, self.n)
         timings["directions"] = time.time() - t0
 
         def draft(d: Direction) -> ArchitectureDraft:
-            user = ctx + "\n\n" + _block("방향", f"{d.title}\n{d.idea}")
+            others = "\n".join(f"- {o.title} (대표 변경: {', '.join(o.signature_changes)})"
+                               for o in directions if o is not d)
+            user = (ctx + "\n\n" + _block("방향", f"[{AXIS_LABEL[d.axis]}] {d.title}\n{d.idea}\n"
+                                            f"대표 변경: {', '.join(d.signature_changes)}")
+                    + "\n\n" + _block("다른_후보", others or "(없음)"))
             return self.llm.structured(SYSTEM_DRAFT, user, ArchitectureDraft, effort="medium")
 
         with ThreadPoolExecutor(max_workers=self.n + 1) as pool:
@@ -143,7 +184,7 @@ class Architect:
             drafts, failed = [], []
             for d, f in zip(directions, draft_fs):
                 try:
-                    drafts.append(f.result())
+                    drafts.append((d, f.result()))
                 except Exception as e:  # noqa: BLE001 — 한 안이 실패해도 나머지는 보여준다
                     failed.append(f"{d.title}: {type(e).__name__}: {e}")
             if not drafts:
@@ -157,13 +198,13 @@ class Architect:
         cur_cost = estimate(current.nodes) if current else None
         cur_total = cur_cost.monthly_total_usd if cur_cost and cur_cost.monthly_total_usd > 0 else None
         cands = []
-        for d in drafts:
+        for direction, d in drafts:
             c = estimate(d.diagram.nodes)
             diff = None
             if cur_total and c.monthly_total_usd > 0:
                 diff = {"usd": round(c.monthly_total_usd - cur_total, 2),
                         "pct": round((c.monthly_total_usd - cur_total) / cur_total * 100, 1)}
-            cands.append({"draft": d, "cost": c, "vs_current": diff, "layout": layout(d.diagram)})
+            cands.append({"direction": direction, "draft": d, "cost": c, "vs_current": diff, "layout": layout(d.diagram)})
 
         def money(c) -> str:  # 계산된 항목이 하나도 없으면 $0 이 아니라 "계산 불가"
             if not any(it.monthly_usd is not None for it in c["cost"].items):
@@ -190,6 +231,9 @@ class Architect:
             c, it = cands[i], by_index.get(i)
             architectures.append({
                 "rank": rank,
+                "axis": c["direction"].axis,
+                "axis_label": AXIS_LABEL[c["direction"].axis],
+                "signature_changes": c["direction"].signature_changes,
                 "rank_reason": it.rank_reason if it else "",
                 "best_for": it.best_for if it else "",
                 "scores": it.scores.model_dump() if it else None,
