@@ -168,6 +168,46 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 
 `recommendations[].sources` 의 숫자 = `sources[].n` → 프론트에서 "참고한 Best Practice" 링크로 표시.
 
+### `POST /architectures` — 추천 아키텍처 5개 (순위·장단점·비용·설계도)
+
+요청은 `/recommend` 와 같다 (`/intake` 의 `recommend_request` 를 그대로 보내도 됨) + 선택 `count`(1~5, 기본 5).
+
+```json
+{ "infra": "EC2 m5.2xlarge 10대 ...", "goal": "비용 절감", "priorities": ["cost", "reliability"], "count": 5 }
+```
+
+응답 (`architectures` 는 rank 순으로 정렬됨):
+
+```jsonc
+{
+  "overall": "5개 안 비교 총평 …",
+  "current": { "cost": { "monthly_total_usd": 4180.5, "items": [...] }, "nodes": [...] },  // 현재 인프라 계산
+  "architectures": [
+    {
+      "rank": 1, "rank_reason": "…", "best_for": "…",
+      "scores": { "cost": 5, "performance": 4, "reliability": 4, "operations": 3, "migration": 4 },  // 1~5
+      "name": "…", "concept": "…", "easy_explanation": "비전공자용 설명",
+      "pros": ["…"], "cons": ["…"], "migration_steps": ["…"],
+      "diagram": { "zones": ["AZ1","AZ2"], "tiers": [...], "nodes": [...], "groups": [...], "edges": [...] },
+      "layout":  { "width": 1200, "height": 900, "boxes": [...], "nodes": [...], "edges": [...] },  // 그대로 그리면 되는 좌표
+      "cost": { "monthly_total_usd": 2610.2, "items": [{ "node_id": "web", "monthly_usd": 292.9, "formula": "…" }],
+                "unpriced": [], "assumptions": ["서울 리전 온디맨드 기준", …] },
+      "vs_current": { "usd": -1570.3, "pct": -37.6 },
+      "sources": [1, 4], "bp_ids": ["COST06-BP03"]
+    }
+  ],
+  "sources": [ { "n": 1, "title": "…", "url": "…" } ],
+  "failed": [],              // 생성 실패한 안 (있으면 나머지만 반환)
+  "timings_s": { … }
+}
+```
+
+- 설계도 그리기: `layout.boxes`(cloud·VPC·AZ·subnet·Auto Scaling 그룹 사각형) → `layout.edges` → `layout.nodes`(아이콘) 순서로.
+  `nodes[].icon` 은 AWS Architecture Icons 키 (`ec2`, `rds`, `alb` …, 전체 목록은 `schemas.py` 의 `Icon`)
+- 노드를 누르면 `cost.items` 에서 같은 `node_id` 를 찾아 비용·계산식을 보여주면 된다
+- 비용은 `data/pricing/ap-northeast-2.json`(AWS 공식 Price List) 로 코드가 계산한다 — AI 가 가격을 쓰지 않는다. 가격표 갱신: `uv run python build_pricing.py`
+- 1~3분 걸린다 (아키텍처 5개를 병렬 생성 후 순위 비교). 프론트에 로딩 화면 필요
+
 ### `POST /chat` — 챗봇 (스트리밍 텍스트)
 
 ```json
