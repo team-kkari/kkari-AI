@@ -224,7 +224,7 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 
 ### `POST /terraform` — 추천 아키텍처 → Terraform 초안 (즉시, AI 호출 없음)
 
-`/architectures` 응답의 `architectures[i]` 를 그대로 보내면 된다 (`name`, `diagram` 사용). 선택: `constraints`, `format`(`json`|`zip`).
+`/architectures` 응답의 `architectures[i]` 를 그대로 보내면 된다 (`name`, `diagram` 사용). 선택: `constraints`, `format`(`json`|`zip`|`tf`).
 
 ```json
 { "name": "Graviton ASG + RDS Multi-AZ", "diagram": { ... }, "constraints": { "frozen_resources": ["RDS prod-db"] }, "format": "json" }
@@ -232,6 +232,7 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 
 - `json` 응답: `{ "project", "files": {"versions.tf", "variables.tf", "main.tf", "outputs.tf", "README.md"}, "warnings": [...] }`
 - `zip` 응답: `terraform/*.tf` 가 든 압축 파일 다운로드
+- `tf` 응답: 전체를 합친 `<프로젝트>.tf` 파일 하나 다운로드 (맨 위 주석에 사람이 채울 항목). 폴더에 이 파일만 두고 `terraform init` 하면 된다
 - 사양(인스턴스 타입·대수·엔진·Multi-AZ·스토리지)은 diagram 그대로 = 비용 계산과 같은 값. VPC·서브넷·NAT·보안 그룹(연결선대로)·ALB·ASG·RDS/Aurora·ElastiCache·S3·EFS·CloudFront·WAF·Fargate·Lambda·SQS·DynamoDB 등 변환
 - 보안 기본값: 저장 암호화, S3 퍼블릭 차단, IMDSv2, RDS 비밀번호 Secrets Manager 자동 관리, deletion_protection
 - 변경 금지 리소스는 `prevent_destroy` + `terraform import` 안내 주석. 자동 적용(apply)은 하지 않는다

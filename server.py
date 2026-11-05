@@ -40,6 +40,7 @@ from generator import RAG, source_refs
 from intake import FIELDS, WARMUP, Intake
 from retriever import CATEGORIES
 from schemas import Constraints, Diagram
+from terraform_gen import combine as combine_terraform
 from terraform_gen import generate as generate_terraform
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -133,7 +134,8 @@ class TerraformReq(BaseModel):
     name: str = Field("kkari", description="아키텍처 이름 (리소스 이름 접두사로 변환)")
     diagram: Diagram = Field(description="/architectures 응답의 architectures[i].diagram")
     constraints: Constraints | None = Field(None, description="고객 제약 — 개인정보·변경 금지 리소스 반영")
-    format: Literal["json", "zip"] = Field("json", description="json: 파일 내용을 JSON 으로, zip: 압축 파일 다운로드")
+    format: Literal["json", "zip", "tf"] = Field(
+        "json", description="json: 파일별 내용을 JSON 으로, zip: 압축 파일, tf: 전체를 합친 <프로젝트>.tf 파일 하나")
 
 
 class ChatReq(BaseModel):
@@ -287,6 +289,9 @@ def terraform(req: TerraformReq):
     out = generate_terraform(req.diagram, req.name, req.constraints)
     if req.format == "json":
         return out
+    if req.format == "tf":
+        return Response(combine_terraform(out), media_type="text/plain; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{out["project"]}.tf"'})
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for path, text in out["files"].items():
