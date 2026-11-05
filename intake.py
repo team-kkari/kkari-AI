@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -124,6 +125,7 @@ SYSTEM_TMPL = """너는 클라우드 인프라 관리 서비스의 초기 상담
 - 답이 모호하면 그 항목을 한 번 더 구체적으로 묻는다. 고객이 모른다고 하면 null 로 두고 넘어간다.
 - quick_replies 는 실제로 자주 나올 법한 답변으로 만든다 (예: "다운타임 불가", "새벽 30분 허용").
 - 필수 항목이 다 모이면 지금까지 파악한 내용을 3~5줄로 요약하고, 진단을 시작해도 되는지 확인하며 ready=true 로 한다.
+- 필수 항목이 하나라도 남아 있으면 ready=false 로 두고 그 항목을 묻는다 (요약과 함께 물어도 된다).
 - 고객이 "바로 진단해 줘" 같이 원하면 남은 항목이 있어도 ready=true 로 하고, 무엇이 비어 있는지 알려준다.
 - 첫 턴(대화가 비어 있음)에는 짧게 인사하고 첫 질문을 한다. 고객사명이 필수 항목인데 아직 모르면 첫 질문에서
   고객사명을 함께 묻는다 (예: "먼저 고객사명과 운영 중인 서비스를 알려주세요").
@@ -148,6 +150,20 @@ def is_filled(p: Profile, key: str) -> bool:
     if isinstance(v, bool):
         return True
     return bool(v)
+
+
+SKIP = re.compile(r"바로|그냥|건너\s*(뛰|뛸|뛴)|넘어\s*(가|갈|갑)|생략|그만\s*물|(진단|검토|분석).{0,8}(시작|진행)")
+
+
+def skip_requested(history: list[dict]) -> bool:
+    """고객이 남은 질문 없이 진행하자고 했는지 (마지막 고객 메시지 기준)."""
+    last = next((m["content"] for m in reversed(history) if m.get("role") == "user"), "")
+    return bool(SKIP.search(last))
+
+
+def decide_ready(model_ready: bool, missing_items: list, history: list[dict]) -> bool:
+    """모델이 ready 라고 해도 필수 항목이 남아 있으면, 고객이 건너뛰자고 한 경우에만 true."""
+    return model_ready and (not missing_items or skip_requested(history))
 
 
 def missing(p: Profile, required: list[str] | None = None) -> list[str]:
@@ -178,14 +194,15 @@ class Intake:
         t0 = time.time()
         out: Turn = self.llm.structured(system_prompt(required), user, Turn, effort="low")
         p = out.profile.to_profile()
+        ready = decide_ready(out.ready, missing(p, required), history)
         result = {
             "reply": plain(out.reply),
             "quick_replies": [plain(q) for q in out.quick_replies],
             "profile": p.model_dump(),
             "missing": [LABELS.get(k, k) for k in missing(p, required)],
             "missing_fields": missing(p, required),
-            "ready": out.ready,
-            "recommend_request": to_recommend_request(p, infra_context) if out.ready else None,
+            "ready": ready,
+            "recommend_request": to_recommend_request(p, infra_context) if ready else None,
         }
         if session_id != WARMUP:
             self._log(session_id, history, infra_context, result, time.time() - t0)

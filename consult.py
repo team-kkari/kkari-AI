@@ -22,6 +22,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from intake import decide_ready
 from textfmt import KRW_PER_USD, OUTPUT_RULES, plain, plain_tree
 
 LOGS = Path(__file__).parent / "data" / "consult_logs"
@@ -271,6 +272,7 @@ SYSTEM = f"""너는 클라우드 비용·구조 검토 서비스의 '고객창�
 
 [마무리]
 - 필수 질문이 모두 채워지면 지금까지 내용을 쉬운 말로 3~5줄 요약하고 "이대로 검토를 시작할까요?" 라고 묻고 ready=true.
+- 필수 질문이 하나라도 남아 있으면 ready=false 로 두고 그 질문을 한다.
 - 고객이 "바로 검토해 주세요" 처럼 원하면 남은 질문이 있어도 ready=true 로 하고 무엇이 비었는지 알려 준다.
 
 [profile]
@@ -294,6 +296,7 @@ class Consult:
         out: ConsultTurn = self.llm.structured(SYSTEM, user, ConsultTurn, effort="low")
         p = out.profile
         req = missing(p, "required")
+        ready = decide_ready(out.ready, req, history)
         result = {
             "reply": plain(out.reply),
             "question": question_meta(out.question_id, p),
@@ -302,8 +305,8 @@ class Consult:
             "missing": req,
             "missing_labels": [QUESTIONS[q]["label"] for q in req],
             "recommended_missing": missing(p, "recommended"),
-            "ready": out.ready,
-            "recommend_request": to_recommend_request(p, file_analysis) if out.ready else None,
+            "ready": ready,
+            "recommend_request": to_recommend_request(p, file_analysis) if ready else None,
         }
         if session_id != WARMUP:
             _log(session_id, history, file_analysis, result, time.time() - t0)
