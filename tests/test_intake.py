@@ -136,3 +136,46 @@ def test_intake_endpoint_ready_false_when_company_missing(client, llm):
     llm.responses[Turn] = TURN.model_copy(update={"ready": True, "profile": llm_profile(workload="데이터 파이프라인")})
     j = client.post("/intake", json={"history": [{"role": "user", "content": "비용 최우선이에요"}]}).json()
     assert j["ready"] is False and j["recommend_request"] is None and "company_name" in j["missing_fields"]
+
+
+# ───────────────────────── infra_status (인프라 유무) ─────────────────────────
+
+
+def test_default_required_by_infra_status():
+    from intake import REQUIRED_EXISTING, REQUIRED_NEW, default_required
+    assert default_required("EXISTING", "[AWS 분석] 리전: ap-northeast-1") == REQUIRED_EXISTING == ["monthly_budget", "priorities"]
+    assert default_required("EXISTING", "") == REQUIRED          # 자동 수집 정보가 없으면 줄이지 않는다
+    assert default_required("NONE", "") == REQUIRED_NEW
+    assert "architecture" not in REQUIRED_NEW and "cost" not in REQUIRED_NEW and "frozen_resources" not in REQUIRED_NEW
+    assert default_required(None, "x") == REQUIRED
+
+
+def test_system_prompt_differs_by_infra_status():
+    from intake import system_prompt
+    assert "이미 AWS 인프라가 있다" in system_prompt(["monthly_budget", "priorities"], "EXISTING", "ctx")
+    assert "이미 AWS 인프라가 있다" not in system_prompt(["monthly_budget"], "EXISTING", "")
+    new = system_prompt(["workload"], "NONE")
+    assert "아직 AWS 인프라가 없다" in new and "워크로드" in new and "{required}" not in new
+
+
+def test_intake_endpoint_existing_infra_asks_only_value_fields(client, llm):
+    llm.responses[Turn] = TURN.model_copy(update={"ready": True, "profile": llm_profile(
+        monthly_budget=500, priorities=["cost"])})
+    j = client.post("/intake", json={"infra_status": "EXISTING", "infra_context": "[AWS 분석] EC2 2대",
+                                     "history": [{"role": "user", "content": "비용이 제일 중요해요"}]}).json()
+    assert j["missing_fields"] == [] and j["ready"] is True
+    assert j["recommend_request"]["priorities"] == ["cost"]
+
+
+def test_intake_endpoint_new_build_fills_defaults(client, llm):
+    llm.responses[Turn] = TURN.model_copy(update={"ready": True, "profile": llm_profile(
+        workload="쇼핑몰", traffic="동시 접속 100명", availability="하루 1시간 중단 가능", monthly_budget=300,
+        contains_personal_data="yes", priorities=["reliability"])})
+    j = client.post("/intake", json={"infra_status": "NONE", "history": [{"role": "user", "content": "x"}]}).json()
+    assert j["missing_fields"] == [] and j["ready"] is True
+    assert j["profile"]["frozen_resources"] == [] and "신규 구축" in j["profile"]["architecture"]
+    assert "신규 구축" in j["recommend_request"]["infra"]
+
+
+def test_intake_endpoint_rejects_unknown_infra_status(client):
+    assert client.post("/intake", json={"infra_status": "MAYBE"}).status_code == 422

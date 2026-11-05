@@ -28,3 +28,15 @@ def test_won_amounts_become_dollars_without_duplicates():
     assert plain("예산은 1.5억 원입니다") == "예산은 약 $107,143입니다"
     for keep in ("원화로 말씀해 주세요", "사원 3명", "5만원권"):                          # 금액이 아닌 '원' 은 그대로
         assert plain(keep) == keep
+
+
+def test_rich_keeps_bold_and_spaces_attached_text():
+    from textfmt import CHAT_OUTPUT_RULES, rich
+    assert rich("우선순위는 **고가용성**, **비용 절감** 중 무엇인가요?") == "우선순위는 **고가용성**, **비용 절감** 중 무엇인가요?"
+    assert rich("**고객사명**과 *서비스*를 알려주세요") == "**고객사명** 과 서비스를 알려주세요"   # 글자가 붙으면 공백
+    assert rich("a**b**c") == "a **b** c"
+    assert rich("## 요약\n- **t4g.small** 2대\n__중요__ 합니다") == "요약\n- **t4g.small** 2대\n**중요** 합니다"
+    assert rich("**닫히지 않은 굵게") == "닫히지 않은 굵게"          # 짝 없는 ** 는 지움
+    assert rich("월 **300만 원**이면") == "월 **약 $2,143** 이면"      # 원화는 달러로
+    assert rich("2 * 3 = 6, 비용 $245") == "2 * 3 = 6, 비용 $245"
+    assert "**굵게**" in CHAT_OUTPUT_RULES and "달러($)" in CHAT_OUTPUT_RULES and "글자(조사·어미)를 붙이지 않는다" in CHAT_OUTPUT_RULES

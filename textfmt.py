@@ -23,6 +23,19 @@ OUTPUT_RULES = f"""
   좋은 예: "월 예산은 약 $3,570 으로 정리할게요." / 나쁜 예: "500만 원(약 $3,570)", "500만 원이면 $3,570".
 """
 
+# 챗봇(상담) 답변 전용 규칙: 핵심 단어만 굵게 허용. 프론트가 **굵게** 만 굵은 글씨로 보여 준다.
+CHAT_OUTPUT_RULES = f"""
+[출력 형식 — 반드시 지킨다]
+- 마크다운 중 '**굵게**' 만 쓴다. 제목(#), 기울임(*), 밑줄(__), `코드`, 표, 링크 문법은 쓰지 않는다. 목록은 줄바꿈 후 '- ' 로 시작한다.
+- 굵게는 질문의 핵심 단어나 중요한 수치·선택지에만 쓴다. 한 메시지에 1~4곳, 한 단어에서 짧은 구절까지만 굵게 한다. 문장 전체를 굵게 하지 않는다.
+- 굵은 글씨 바로 뒤에 글자(조사·어미)를 붙이지 않는다. 닫는 ** 뒤에는 공백이나 문장부호(. , ? ! : ) 만 온다.
+  굵은 구절이 쉼표·물음표·공백 앞에 오도록 문장을 바꾼다.
+  좋은 예: "우선순위는 **고가용성**, **비용 절감** 중 무엇인가요?" / 나쁜 예: "**고객사명**을", "**RDS**가".
+- 금액은 항상 미국 달러($)로만 쓴다 (예: $3,570, 월 $245). 원화 금액은 한 글자도 쓰지 않는다.
+  고객이 원화로 말해도 그 원화 금액을 되풀이하지 말고, 1달러 = {KRW_PER_USD:,}원으로 환산한 달러만 말한다.
+  좋은 예: "월 예산은 약 $3,570 으로 정리할게요." / 나쁜 예: "500만 원(약 $3,570)", "500만 원이면 $3,570".
+"""
+
 _BOLD = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1", re.S)
 _ITALIC = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?!\*)")  # 뒤에 한글 조사가 붙어도 처리
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+", re.M)
@@ -70,6 +83,35 @@ def plain(text: str) -> str:
     text = _HEADING.sub("", text)
     text = _CODE.sub(r"\1", text)
     return text.replace("**", "").replace("__", "")
+
+
+_BOLD_KEEP = re.compile(r"\*\*(?=\S)([^*\n]+?)(?<=\S)\*\*")
+_BOLD_UNDER = re.compile(r"(?<!\w)__(?=\S)([^_\n]+?)(?<=\S)__(?!\w)")
+_WORD = re.compile(r"\w")  # 한글·영문·숫자
+
+
+def rich(text: str) -> str:
+    """챗봇 답변용 정리: **굵게** 는 남기고 나머지 마크다운(제목·기울임·코드)과 원화 금액은 plain() 처럼 처리한다.
+    굵은 글씨 앞뒤에 글자가 바로 붙으면 공백을 넣고(렌더러가 굵게 못 알아보는 경우 방지), 짝이 없는 ** 는 지운다."""
+    if not text:
+        return text
+    text = usd_only(text)
+    text = _BOLD_UNDER.sub(r"**\1**", text)
+    text = _ITALIC.sub(r"\1", text)
+    text = _HEADING.sub("", text)
+    text = _CODE.sub(r"\1", text)
+
+    def bold(m: re.Match) -> str:
+        before = m.string[m.start() - 1] if m.start() > 0 else ""
+        after = m.string[m.end()] if m.end() < len(m.string) else ""
+        lead = " " if before and _WORD.match(before) else ""
+        tail = " " if after and _WORD.match(after) else ""
+        return f"{lead}**{m.group(1)}**{tail}"
+
+    text = _BOLD_KEEP.sub(bold, text)
+    # 짝이 맞는 굵게만 남기고 나머지 ** 는 지운다
+    parts = re.split(r"(\*\*[^*\n]+\*\*)", text)
+    return "".join(p if i % 2 else p.replace("**", "") for i, p in enumerate(parts))
 
 
 def plain_tree(obj):

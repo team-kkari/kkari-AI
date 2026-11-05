@@ -166,7 +166,10 @@ class IntakeReq(BaseModel):
     infra_context: str = Field("", description="백엔드가 자동 수집한 인프라 요약 (있으면 이건 다시 묻지 않음)")
     session_id: str | None = Field(None, description="대화 로그 묶음용 ID (백엔드에서 생성)")
     required_fields: list[str] | None = Field(
-        None, description=f"필수로 물어볼 profile 항목 (생략 시 기본 목록). 가능: {FIELDS}")
+        None, description=f"필수로 물어볼 profile 항목 (생략 시 infra_status 에 맞는 기본 목록). 가능: {FIELDS}")
+    infra_status: Literal["EXISTING", "NONE"] | None = Field(
+        None, description=("의뢰인의 인프라 상태. EXISTING=이미 AWS 인프라가 있고 계정 연결로 자동 수집됨(가치·예산만 질문), "
+                           "NONE=아직 인프라가 없는 신규 구축(구성·비용 대신 만들 서비스를 질문). 생략하면 기존 방식"))
 
 
 # ───────────────────────── 공통 검사 ─────────────────────────
@@ -246,7 +249,7 @@ def intake(req: IntakeReq):
             raise invalid(f"required_fields 에 알 수 없는 항목: {bad}. 가능: {FIELDS}" if bad
                           else "required_fields 는 비울 수 없습니다 (생략하면 기본 목록)")
     return _call_llm(lambda: Intake(rag.llm).turn(req.history, req.infra_context, req.session_id,
-                                                  required=req.required_fields))
+                                                  required=req.required_fields, infra_status=req.infra_status))
 
 
 def _line(obj: dict) -> bytes:
