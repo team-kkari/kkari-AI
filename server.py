@@ -9,6 +9,7 @@
     POST /architectures  추천 아키텍처 N개 — AI 순위·점수·장단점·월 비용·제약 위반·설계도 좌표 (1~3분)
     POST /recommend      인프라 정보 → 개선안 목록(JSON) + 출처
     POST /chat           챗봇 — NDJSON 스트리밍 (sources → delta… → done)
+    POST /terraform      추천 아키텍처 하나(diagram) → Terraform 초안 파일 (AI 호출 없음, 즉시)
 
 에러는 모두 {"code", "message", "retryable"} (errors.py 참고).
 
@@ -18,15 +19,18 @@
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
+import zipfile
+from typing import Literal
 import os
 import threading
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -35,7 +39,8 @@ from errors import ApiError, classify, invalid
 from generator import RAG, source_refs
 from intake import FIELDS, WARMUP, Intake
 from retriever import CATEGORIES
-from schemas import Constraints
+from schemas import Constraints, Diagram
+from terraform_gen import generate as generate_terraform
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("kkari")
@@ -121,6 +126,14 @@ class ArchitecturesReq(RecommendReq):
     count: int = Field(5, description="추천 개수 (1~5)")
     current_monthly_usd: float | None = Field(
         None, description="백엔드가 분석한 현재 월 비용(USD). 주면 현재 대비 증감의 기준이 되고 AI 추정을 건너뜀")
+
+
+class TerraformReq(BaseModel):
+    """/architectures 응답의 architectures[i] 를 그대로 보내도 된다 (name, diagram 만 사용)."""
+    name: str = Field("kkari", description="아키텍처 이름 (리소스 이름 접두사로 변환)")
+    diagram: Diagram = Field(description="/architectures 응답의 architectures[i].diagram")
+    constraints: Constraints | None = Field(None, description="고객 제약 — 개인정보·변경 금지 리소스 반영")
+    format: Literal["json", "zip"] = Field("json", description="json: 파일 내용을 JSON 으로, zip: 압축 파일 다운로드")
 
 
 class ChatReq(BaseModel):
@@ -266,3 +279,17 @@ def chat(req: ChatReq):
                 yield _line({"type": "error", **err.body()})
 
     return StreamingResponse(body(), media_type="application/x-ndjson; charset=utf-8")
+
+
+@app.post("/terraform")
+def terraform(req: TerraformReq):
+    """AI 를 다시 부르지 않고 diagram 을 코드로 변환한다 (1초 미만). 자동 적용(apply)은 하지 않는다."""
+    out = generate_terraform(req.diagram, req.name, req.constraints)
+    if req.format == "json":
+        return out
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for path, text in out["files"].items():
+            z.writestr(f"terraform/{path}", text)
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{out["project"]}-terraform.zip"'})
