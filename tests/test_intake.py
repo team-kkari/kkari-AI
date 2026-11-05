@@ -152,10 +152,12 @@ def test_default_required_by_infra_status():
 
 def test_system_prompt_differs_by_infra_status():
     from intake import system_prompt
-    assert "이미 AWS 인프라가 있다" in system_prompt(["monthly_budget", "priorities"], "EXISTING", "ctx")
+    existing = system_prompt(["monthly_budget", "priorities"], "EXISTING", "ctx")
+    assert "이미 AWS 인프라가 있다" in existing and "고객사명은 의뢰를 만들 때 이미 받았으니 묻지 않는다" in existing
     assert "이미 AWS 인프라가 있다" not in system_prompt(["monthly_budget"], "EXISTING", "")
     new = system_prompt(["workload"], "NONE")
     assert "아직 AWS 인프라가 없다" in new and "워크로드" in new and "{required}" not in new
+    assert "고객사명은 의뢰를 만들 때 이미 받았으니 묻지 않는다" in new
 
 
 def test_intake_endpoint_existing_infra_asks_only_value_fields(client, llm):
