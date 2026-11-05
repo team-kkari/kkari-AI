@@ -47,7 +47,7 @@ retriever.Retriever = FakeRetriever
 import server  # noqa: E402 — 위 바꿔치기 이후에 import 해야 함
 from architect import Directions, Ranking  # noqa: E402
 from generator import Solution  # noqa: E402
-from intake import Profile, Turn  # noqa: E402
+from intake import ProfileLLM, Turn  # noqa: E402
 from schemas import ArchitectureDraft, CurrentInfra  # noqa: E402
 
 
@@ -92,7 +92,18 @@ def sample_draft(name: str = "3-Tier", **update) -> ArchitectureDraft:
 
 
 SOLUTION = Solution(summary="요약", current_assessment="평가", recommendations=[], caveats=[])
-TURN = Turn(reply="안녕하세요", quick_replies=["예", "아니오"], profile=Profile(), ready=False)
+
+
+def llm_profile(**kw) -> ProfileLLM:
+    """Claude 출력 형식(null 없음)의 빈 프로필. 모르는 값 = "" / -1 / "unknown"."""
+    base = {k: "" for k, f in ProfileLLM.model_fields.items() if f.annotation is str}
+    base.update(monthly_budget=-1, currency="unknown", contains_personal_data="unknown", frozen_status="unknown",
+                frozen_resources=[], priorities=[])
+    base.update(kw)
+    return ProfileLLM(**base)
+
+
+TURN = Turn(reply="안녕하세요", quick_replies=["예", "아니오"], profile=llm_profile(), ready=False)
 
 
 def directions(titles: list[str]) -> Directions:

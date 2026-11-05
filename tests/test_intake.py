@@ -1,7 +1,7 @@
 """intake.missing / is_filled / to_recommend_request."""
 import pytest
 
-from conftest import TURN
+from conftest import TURN, llm_profile
 from intake import CONSTRAINT_FIELDS, REQUIRED, Profile, Turn, is_filled, missing, to_recommend_request
 
 
@@ -62,7 +62,7 @@ def test_missing_only_checks_given_fields():
 
 
 def test_intake_endpoint_uses_required_fields(client, llm):
-    llm.responses[Turn] = TURN.model_copy(update={"profile": Profile(workload="쇼핑몰")})
+    llm.responses[Turn] = TURN.model_copy(update={"profile": llm_profile(workload="쇼핑몰")})
     r = client.post("/intake", json={"required_fields": ["workload", "traffic"]})
     assert r.status_code == 200, r.text
     assert r.json()["missing_fields"] == ["traffic"]
@@ -91,3 +91,18 @@ def test_to_recommend_request_splits_constraints():
 def test_to_recommend_request_keeps_none_constraints():
     req = to_recommend_request(Profile(workload="x"))
     assert req["constraints"] == {k: None for k in CONSTRAINT_FIELDS}
+
+
+def test_llm_profile_to_profile_converts_sentinels():
+    """Claude 출력의 "" / -1 / unknown → API 응답의 null, none → [], yes/no → bool."""
+    p = llm_profile().to_profile()
+    assert p.workload is None and p.monthly_budget is None and p.currency is None
+    assert p.contains_personal_data is None and p.frozen_resources is None
+    p = llm_profile(workload="쇼핑몰", monthly_budget=0, contains_personal_data="no", frozen_status="none",
+                    priorities=["cost", "nope"]).to_profile()
+    assert p.workload == "쇼핑몰" and p.monthly_budget == 0 and p.contains_personal_data is False
+    assert p.frozen_resources == [] and p.priorities == ["cost"]
+    p = llm_profile(monthly_budget=5_000_000, currency="KRW", contains_personal_data="yes", frozen_status="listed",
+                    frozen_resources=["RDS prod-db MySQL 8.0"]).to_profile()
+    assert (p.monthly_budget, p.currency, p.contains_personal_data, p.frozen_resources) == \
+        (5_000_000, "KRW", True, ["RDS prod-db MySQL 8.0"])
