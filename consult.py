@@ -22,6 +22,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from textfmt import KRW_PER_USD, OUTPUT_RULES, plain, plain_tree
+
 LOGS = Path(__file__).parent / "data" / "consult_logs"
 WARMUP = "__warmup__"
 
@@ -100,8 +102,7 @@ class ConsultProfileLLM(BaseModel):
     desired_outcomes: list[Outcome] = Field(description="Q2 받고 싶은 결과 (여러 개)")
     priority_order: list[Outcome] = Field(description="Q3 desired_outcomes 중 중요한 순서 (최대 3개)")
     budget_stance: Budget = Field(description="Q4 예산 태도")
-    monthly_budget: float = Field(description="Q4 budget_stance=amount 일 때 월 금액(원화면 원 단위). 그 외 -1")
-    currency: Literal["USD", "KRW", "unknown"] = Field(description="monthly_budget 통화. 원·만원이면 KRW")
+    monthly_budget: float = Field(description="Q4 budget_stance=amount 일 때 월 금액 (USD, 원화로 들으면 달러로 환산). 그 외 -1")
     service_description: str = Field(description="Q5 서비스 소개 (무엇을 하는 서비스인지). 모르면 빈 문자열")
     architecture_type: ArchType = Field(description="Q6 서비스 구조. 고객이 모른다고 하면 unknown, 안 물어봤으면 not_asked")
     daily_users: Users = Field(description="Q7 하루 사용자 수 구간")
@@ -128,6 +129,7 @@ class ConsultProfileLLM(BaseModel):
         out["architecture_type"] = None if self.architecture_type == "not_asked" else self.architecture_type
         out["daily_users"] = None if self.daily_users == "not_asked" else self.daily_users
         out["monthly_budget"] = None if self.monthly_budget < 0 else self.monthly_budget
+        out["currency"] = "USD" if self.budget_stance == "amount" and self.monthly_budget >= 0 else None
         out["contains_personal_data"] = {"yes": True, "no": False}.get(self.personal_data)
         out["frozen_resources"] = {"not_asked": None, "none": []}.get(self.frozen_status, self.frozen_resources)
         out["change_tolerance"] = self.change_tolerance if self.change_asked else None
@@ -142,7 +144,7 @@ def filled(p: ConsultProfileLLM) -> dict[str, bool]:
     return {
         "Q1": bool(p.concern), "Q2": bool(p.desired_outcomes),
         "Q3": bool(p.priority_order) or len(p.desired_outcomes) == 1,
-        "Q4": p.budget_stance != "not_asked" and (p.budget_stance != "amount" or (p.monthly_budget >= 0 and p.currency != "unknown")),
+        "Q4": p.budget_stance != "not_asked" and (p.budget_stance != "amount" or p.monthly_budget >= 0),
         "Q5": bool(p.service_description), "Q6": p.architecture_type != "not_asked", "Q7": p.daily_users != "not_asked",
         "Q8": bool(p.traffic_pattern), "Q9": p.outage_impact != "not_asked",
         "Q9-1": bool(p.recovery_target), "Q10": p.personal_data != "not_asked", "Q11": bool(p.compliance),
@@ -213,7 +215,7 @@ def to_recommend_request(p: ConsultProfileLLM, analysis: dict | None = None) -> 
         "infra": "\n".join(infra),
         "goal": p.concern + (" (지금보다 비용을 줄이고 싶음)" if p.budget_stance == "reduce" else ""),
         "priorities": priorities,
-        "constraints": {"monthly_budget": budget, "currency": pub["currency"] if p.budget_stance == "amount" else None,
+        "constraints": {"monthly_budget": budget, "currency": "USD" if p.budget_stance == "amount" else None,
                         "contains_personal_data": pub["contains_personal_data"],
                         "frozen_resources": pub["frozen_resources"]},
         "current_monthly_usd": cost if cost and cost > 0 else None,
@@ -224,7 +226,7 @@ def to_recommend_request(p: ConsultProfileLLM, analysis: dict | None = None) -> 
 
 
 class ConsultTurn(BaseModel):
-    reply: str = Field(description="고객에게 보낼 메시지. 직전 답을 쉬운 말로 확인하고 질문 하나. 마크다운 가능")
+    reply: str = Field(description="고객에게 보낼 메시지. 직전 답을 쉬운 말로 확인하고 질문 하나. 마크다운 금지, 일반 텍스트")
     question_id: QuestionId = Field(description="이번 메시지에서 묻는 질문 ID. 요약·확인만 하면 none")
     quick_replies: list[str] = Field(description="눌러서 답할 수 있는 짧은 답 2~6개 (선택형 질문이면 보기 그대로)")
     profile: ConsultProfileLLM = Field(description="대화 전체와 업로드 파일 분석으로 채운 프로필 (매 턴 처음부터 다시 채운다)")
@@ -274,7 +276,8 @@ SYSTEM = f"""너는 클라우드 비용·구조 검토 서비스의 '고객창�
 [profile]
 - 매 턴 대화 전체와 파일 분석을 다시 읽어 처음부터 채운다 (이전 턴 값은 저장되지 않는다).
 - 안 물어본 항목은 not_asked / 빈 문자열 / -1. 고객이 모른다고 한 Q6·Q7 은 unknown.
-- 모든 메시지는 한국어."""
+- 모든 메시지는 한국어.
+- 예산(Q4)을 원화로 들으면 달러로 환산해 "월 약 $3,570 으로 정리할게요" 처럼 확인한다.""" + OUTPUT_RULES
 
 
 class Consult:
@@ -292,9 +295,9 @@ class Consult:
         p = out.profile
         req = missing(p, "required")
         result = {
-            "reply": out.reply,
+            "reply": plain(out.reply),
             "question": question_meta(out.question_id, p),
-            "quick_replies": out.quick_replies,
+            "quick_replies": [plain(q) for q in out.quick_replies],
             "profile": p.to_public(),
             "missing": req,
             "missing_labels": [QUESTIONS[q]["label"] for q in req],
@@ -363,7 +366,7 @@ class FileAnalysis(BaseModel):
     architecture_type: ArchType = Field(description="구조 유형. 판단 불가면 unknown")
     region: str = Field(description="AWS 리전 코드 (예: ap-northeast-2). 모르면 빈 문자열")
     resources: list[str] = Field(description="주요 리소스와 사양·대수 (예: 'EC2 t3.large x2', 'RDS PostgreSQL db.t4g.medium 단일 AZ')")
-    monthly_cost_usd: float = Field(description="파일에 나온 현재 월 비용(USD). 원화면 1400원/$ 로 환산. 없으면 -1")
+    monthly_cost_usd: float = Field(description=f"파일에 나온 현재 월 비용(USD). 원화면 {KRW_PER_USD}원/$ 로 환산. 없으면 -1")
     traffic_hint: str = Field(description="사용자 수·트래픽에 대한 단서. 없으면 빈 문자열")
     personal_data_hint: Literal["yes", "no", "unknown"] = Field(description="개인정보를 다루는 흔적 (users 테이블, 결제 등)")
     concerns: list[str] = Field(description="눈에 띄는 위험·낭비 (예: 'DB 가 한 곳에만 있음', 'S3 공개 설정') 쉬운 말로 0~5개")
@@ -376,7 +379,7 @@ FILE_SYSTEM = """너는 AWS 인프라 분석가다. 고객(비전공자)이 올�
 - 파일에 실제로 있는 내용만 쓴다. 추측은 '추정' 이라고 밝힌다.
 - '[삭제됨]' 표시는 보안을 위해 지운 비밀값이다. 언급하지 않는다.
 - summary 는 비전공자가 이해할 쉬운 말, technical_summary 는 전문가용 (사양·대수·리전·이중화·월 비용 수치).
-- 한국어로 쓴다. AWS 서비스명·설정값은 영어 그대로."""
+- 한국어로 쓴다. AWS 서비스명·설정값은 영어 그대로.""" + OUTPUT_RULES
 
 
 def prepare_files(files: list[tuple[str, bytes]]) -> tuple[str, list[dict], list[dict], int]:
@@ -426,7 +429,7 @@ def analyze_files(llm, files: list[tuple[str, bytes]]) -> dict:
     user = (f"<텍스트_파일>\n{text or '(없음)'}\n</텍스트_파일>\n\n"
             "위 파일(과 첨부한 이미지·PDF)로 고객의 현재 클라우드 구성을 분석해라.")
     out: FileAnalysis = llm.structured(FILE_SYSTEM, user, FileAnalysis, effort="medium", attachments=blocks or None)
-    d = out.model_dump()
+    d = plain_tree(out.model_dump())
     d["monthly_cost_usd"] = None if out.monthly_cost_usd < 0 else out.monthly_cost_usd
     d["region"] = out.region or None
     notes = {n.name: n.note for n in out.files}

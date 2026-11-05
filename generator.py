@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from errors import LLMOutputError, LLMRefusal
 from retriever import Retriever
+from textfmt import OUTPUT_RULES, plain_stream, plain_tree
 
 RESOURCE_CATEGORIES = ["compute", "database", "network", "container", "serverless"]
 # 인프라 설명을 리소스 단위로 자르는 기준: 줄바꿈, 문장 끝, 쉼표(숫자 안의 쉼표 "$4,200" 은 제외)
@@ -149,12 +150,12 @@ SYSTEM_RECOMMEND = """너는 AWS 인프라 최적화 컨설턴트다. 사용자�
 - 입력된 수치(사용률, 비용, 인스턴스 타입 등)를 직접 인용해 문제를 설명한다. 수치가 없으면 추정하지 말고 caveats 에 "확인 필요"로 남긴다.
 - expected_impact 의 수치는 추정치임을 밝히고 가정을 적는다.
 - 사용자가 우선시하는 최적화 방향을 먼저 다루되, 그 개선이 다른 기둥(보안·안정성)을 해치면 caveats 에 적는다.
-- 모든 텍스트는 한국어로 쓴다. AWS 서비스명과 설정값은 영어 그대로 둔다."""
+- 모든 텍스트는 한국어로 쓴다. AWS 서비스명과 설정값은 영어 그대로 둔다.""" + OUTPUT_RULES
 
 SYSTEM_CHAT = """너는 AWS 인프라 최적화를 돕는 챗봇이다. 아래 <자료> 의 AWS 공식 Best Practice 를 근거로 한국어로 답한다.
 - 근거로 쓴 문장 끝에 [자료 번호] 를 붙인다.
 - 자료에 없는 내용은 일반 지식임을 밝히고 짧게만 답한다.
-- 답은 간결하게: 핵심 → 구체적 방법 → 주의점 순서."""
+- 답은 간결하게: 핵심 → 구체적 방법 → 주의점 순서.""" + OUTPUT_RULES
 
 
 def format_sources(hits: list[dict]) -> str:
@@ -230,7 +231,7 @@ class RAG:
                 f"<우선순위>{', '.join(priorities or []) or '(없음)'}</우선순위>\n\n"
                 f"<자료>\n{format_sources(hits)}\n</자료>")
         sol: Solution = self.llm.structured(SYSTEM_RECOMMEND, user, Solution)
-        return {"solution": sol.model_dump(), "sources": source_refs(hits)}
+        return {"solution": plain_tree(sol.model_dump()), "sources": source_refs(hits)}
 
     def chat_stream(self, question: str, history: list[dict] | None = None,
                     categories: list[str] | None = None, k: int = 8):
@@ -240,4 +241,4 @@ class RAG:
             "role": "user",
             "content": f"<자료>\n{format_sources(hits)}\n</자료>\n\n질문: {question}",
         }]
-        return source_refs(hits), self.llm.stream_text(SYSTEM_CHAT, messages)
+        return source_refs(hits), plain_stream(self.llm.stream_text(SYSTEM_CHAT, messages))

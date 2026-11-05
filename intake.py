@@ -23,6 +23,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from retriever import CATEGORIES
+from textfmt import OUTPUT_RULES, plain
 
 LOGS = Path(__file__).parent / "data" / "intake_logs"
 WARMUP = "__warmup__"  # 서버 시작 시 미리 한 번 호출 (로그 제외)
@@ -38,9 +39,8 @@ class Profile(BaseModel):
     availability: str | None = Field(None, description="가용성 목표: SLA, RTO/RPO, 허용 장애 범위")
     performance: str | None = Field(None, description="성능 요구: 응답 지연, 처리량 목표")
     cost: str | None = Field(None, description="현재 월 비용과 비용 구성, 약정(RI·SP) 보유 여부 (예산 금액은 monthly_budget 에)")
-    monthly_budget: float | None = Field(None, description=(
-        "고객이 밝힌 월 예산 금액 (숫자만, 예: 3000000). 정해진 예산이 없다고 답하면 0, 아직 안 물어봤으면 null"))
-    currency: Literal["USD", "KRW"] | None = Field(None, description="monthly_budget 의 통화. 원/만원이면 KRW(금액은 원 단위로 환산), 달러면 USD")
+    monthly_budget: float | None = Field(None, description="월 예산 (USD). 정해진 예산이 없다고 답하면 0, 아직 안 물어봤으면 null")
+    currency: Literal["USD", "KRW"] | None = Field(None, description="항상 USD (예산이 있을 때). 금액은 모두 달러로 통일")
     contains_personal_data: bool | None = Field(None, description="개인정보(이름·연락처·주소·결제정보 등)를 저장·처리하는지. 확인 전이면 null")
     frozen_resources: list[str] | None = Field(None, description=(
         "변경하면 안 되는 리소스 목록 (예: 'RDS prod-db 엔진·버전', '온프레미스 연동 VPN'). "
@@ -77,8 +77,7 @@ class ProfileLLM(BaseModel):
     availability: str = Field(description="가용성 목표: SLA, RTO/RPO, 허용 장애 범위. 모르면 빈 문자열")
     performance: str = Field(description="성능 요구: 응답 지연, 처리량 목표. 모르면 빈 문자열")
     cost: str = Field(description="현재 월 비용과 비용 구성, 약정(RI·SP) 보유 여부. 모르면 빈 문자열")
-    monthly_budget: float = Field(description="월 예산 금액(숫자, 원화면 원 단위). 예산이 없다고 답하면 0, 아직 모르면 -1")
-    currency: Literal["USD", "KRW", "unknown"] = Field(description="monthly_budget 통화. 모르면 unknown")
+    monthly_budget: float = Field(description="월 예산 (USD, 원화로 들으면 달러로 환산). 예산이 없다고 답하면 0, 아직 모르면 -1")
     contains_personal_data: Literal["yes", "no", "unknown"] = Field(description="개인정보(이름·연락처·주소·결제정보 등) 저장·처리 여부")
     frozen_status: Literal["unknown", "none", "listed"] = Field(
         description="변경 금지 리소스: 아직 안 물어봄=unknown, 고객이 없다고 함=none, 있음=listed")
@@ -94,7 +93,7 @@ class ProfileLLM(BaseModel):
         d = self.model_dump()
         out = {k: (v or None) for k, v in d.items() if isinstance(v, str) and k in Profile.model_fields}
         out["monthly_budget"] = None if self.monthly_budget < 0 else self.monthly_budget
-        out["currency"] = None if self.currency == "unknown" else self.currency
+        out["currency"] = "USD" if self.monthly_budget > 0 else None
         out["contains_personal_data"] = {"yes": True, "no": False}.get(self.contains_personal_data)
         out["frozen_resources"] = {"unknown": None, "none": []}.get(self.frozen_status, self.frozen_resources)
         out["priorities"] = [c for c in self.priorities if c in CATEGORIES]
@@ -102,7 +101,7 @@ class ProfileLLM(BaseModel):
 
 
 class Turn(BaseModel):
-    reply: str = Field(description="고객에게 보낼 메시지: 직전 답변을 짧게 확인하고 다음 질문 1~2개. 마크다운 가능")
+    reply: str = Field(description="고객에게 보낼 메시지: 직전 답변을 짧게 확인하고 다음 질문 1~2개. 마크다운 금지, 일반 텍스트")
     quick_replies: list[str] = Field(description="고객이 눌러서 답할 수 있는 짧은 답변 후보 2~4개 (질문이 없으면 빈 목록)")
     profile: ProfileLLM = Field(description="지금까지 대화와 자동 수집 정보로 채운 요구사항 프로필")
     ready: bool = Field(description="필수 항목이 모두 채워졌거나 고객이 바로 진단을 원하면 true")
@@ -117,7 +116,7 @@ SYSTEM_TMPL = """너는 클라우드 인프라 관리 서비스의 초기 상담
 - 자동 수집된 인프라 정보나 이미 답한 내용은 다시 묻지 않는다. 대신 그 정보를 근거로 더 깊게 묻는다
   (예: 수집 정보에 CPU 12% 가 있으면 "이 사용률이 평소 수준인지, 특정 시간대에 피크가 있는지").
 - 필수 항목({required})을 먼저 채우고, 그다음 나머지 항목을 묻는다.
-- 월 예산은 금액과 통화를 함께 확인한다 (예: "월 예산이 있으신가요? 원화/달러 중 어느 기준인가요?"). 예산이 없다고 하면
+- 월 예산은 금액을 묻고, 달러로 환산해 확인한다 (예: "월 약 $3,570 으로 정리할게요"). 예산이 없다고 하면
   monthly_budget 을 0 으로 하고 다시 묻지 않는다.
 - 이미 확인된 값은 매 턴 그대로 다시 채운다 (이전 턴 프로필은 저장되지 않으므로 대화 전체에서 다시 읽어 채운다).
 - 개인정보 포함 여부는 예/아니오로 확인한다. 변경 금지 리소스는 "절대 바꾸면 안 되는 리소스(엔진·버전·네트워크 연동 등)"가
@@ -135,7 +134,7 @@ profile.priorities 에는 다음 값만 쓴다: {categories}"""
 
 
 def system_prompt(required: list[str]) -> str:
-    return SYSTEM_TMPL.format(required=", ".join(LABELS.get(k, k) for k in required), categories=CATEGORIES)
+    return SYSTEM_TMPL.format(required=", ".join(LABELS.get(k, k) for k in required), categories=CATEGORIES) + OUTPUT_RULES
 
 
 def is_filled(p: Profile, key: str) -> bool:
@@ -145,7 +144,7 @@ def is_filled(p: Profile, key: str) -> bool:
     if key == "frozen_resources":
         return v is not None               # [] = "없음" 으로 확인됨
     if key == "monthly_budget":            # 0 = "정해진 예산 없음" 으로 확인됨
-        return v == 0 or (v is not None and p.currency is not None)
+        return v is not None
     if isinstance(v, bool):
         return True
     return bool(v)
@@ -180,8 +179,8 @@ class Intake:
         out: Turn = self.llm.structured(system_prompt(required), user, Turn, effort="low")
         p = out.profile.to_profile()
         result = {
-            "reply": out.reply,
-            "quick_replies": out.quick_replies,
+            "reply": plain(out.reply),
+            "quick_replies": [plain(q) for q in out.quick_replies],
             "profile": p.model_dump(),
             "missing": [LABELS.get(k, k) for k in missing(p, required)],
             "missing_fields": missing(p, required),
