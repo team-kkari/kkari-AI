@@ -16,6 +16,7 @@ from typing import Iterator, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
+from errors import LLMOutputError, LLMRefusal
 from retriever import Retriever
 
 RESOURCE_CATEGORIES = ["compute", "database", "network", "container", "serverless"]
@@ -87,6 +88,8 @@ class Solution(BaseModel):
 
 
 class LLM(Protocol):
+    """구현 규칙: 모델이 거절하면 errors.LLMRefusal, 출력이 비거나 잘리면 errors.LLMOutputError 를 던진다."""
+
     def stream_text(self, system: str, messages: list[dict]) -> Iterator[str]: ...
     def structured(self, system: str, user: str, schema: type[BaseModel],
                    effort: str = "high") -> BaseModel: ...
@@ -111,7 +114,7 @@ class ClaudeLLM:
             yield from stream.text_stream
             final = stream.get_final_message()
         if final.stop_reason == "refusal":
-            yield "\n\n(요청이 모델 정책에 의해 거절되었습니다. 질문을 바꿔 다시 시도해 주세요.)"
+            raise LLMRefusal()
 
     def structured(self, system, user, schema, effort="high"):
         """effort: 솔루션 생성은 high, 상담 질문처럼 빨라야 하는 건 low."""
@@ -121,9 +124,9 @@ class ClaudeLLM:
             output_format=schema, output_config={"effort": effort}, **self.FALLBACK,
         )
         if resp.stop_reason == "refusal":
-            raise RuntimeError("모델이 요청을 거절했습니다")
+            raise LLMRefusal()
         if resp.parsed_output is None:
-            raise RuntimeError(f"구조화 출력 파싱 실패 (stop_reason={resp.stop_reason})")
+            raise LLMOutputError(f"구조화 출력 파싱 실패 (stop_reason={resp.stop_reason})")
         return resp.parsed_output
 
 

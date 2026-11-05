@@ -1,37 +1,78 @@
-"""RAG API 서버 — 백엔드/프론트에서 호출.
+"""RAG API 서버 — 백엔드가 호출 (브라우저 직접 호출용 아님).
 
     uv run uvicorn server:app --host 0.0.0.0 --port 8000
     문서: http://localhost:8000/docs
 
 엔드포인트
-    POST /search     검색만 (API 키 불필요) — 근거 자료 확인/디버깅용
-    POST /recommend  인프라 정보 → 구조화된 솔루션(JSON) + 출처
-    POST /chat       챗봇 — 스트리밍 텍스트. 출처는 X-Sources 헤더(JSON, URL 인코딩)
-    POST /intake     초기 상담 인터뷰 — 챗봇이 질문하며 요구사항 프로필을 채움, 완료 시 /recommend 요청 데이터
-    POST /architectures  추천 아키텍처 5개 — AI 순위·점수·장단점·월 비용·설계도 좌표 (1~3분)
+    POST /search         검색만 (API 키 불필요) — 근거 자료 확인/디버깅용
+    POST /intake         초기 상담 인터뷰 — 챗봇이 질문하며 요구사항 프로필을 채움, 완료 시 /architectures 요청 데이터
+    POST /architectures  추천 아키텍처 N개 — AI 순위·점수·장단점·월 비용·제약 위반·설계도 좌표 (1~3분)
+    POST /recommend      인프라 정보 → 개선안 목록(JSON) + 출처
+    POST /chat           챗봇 — NDJSON 스트리밍 (sources → delta… → done)
+
+에러는 모두 {"code", "message", "retryable"} (errors.py 참고).
+
+환경 변수
+    ANTHROPIC_API_KEY   Claude API 키
+    ALLOWED_ORIGINS     CORS 허용 출처(쉼표 구분). 비우면 CORS 미적용 = 브라우저에서 직접 호출 불가 (기본)
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
-import urllib.parse
 
-import anthropic
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from architect import Architect
+from architect import Architect, constraints_text
+from errors import ApiError, classify, invalid
 from generator import RAG, source_refs
-from intake import WARMUP, Intake
+from intake import FIELDS, WARMUP, Intake
 from retriever import CATEGORIES
+from schemas import Constraints
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("kkari")
 
 app = FastAPI(title="AWS Best Practice RAG")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
-                   expose_headers=["X-Sources"])
+_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if _origins:
+    app.add_middleware(CORSMiddleware, allow_origins=_origins, allow_methods=["GET", "POST"],
+                       allow_headers=["Content-Type"])
 rag = RAG()  # 시작 시 인덱스·임베딩 모델 로드 (수십 초)
+
+# ───────────────────────── 에러 응답 통일 ─────────────────────────
+
+
+@app.exception_handler(ApiError)
+async def _api_error(_: Request, e: ApiError):
+    return JSONResponse(e.body(), status_code=e.status)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(_: Request, e: RequestValidationError):
+    errs = [{"field": ".".join(str(x) for x in err["loc"] if x != "body"), "message": err["msg"]} for err in e.errors()]
+    return JSONResponse({"code": "VALIDATION_ERROR", "message": "요청 형식이 올바르지 않습니다.",
+                         "retryable": False, "errors": errs}, status_code=422)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_error(_: Request, e: StarletteHTTPException):  # 404, 405 등
+    return JSONResponse({"code": "INVALID_REQUEST" if e.status_code < 500 else "INTERNAL_ERROR",
+                         "message": str(e.detail), "retryable": False}, status_code=e.status_code)
+
+
+@app.exception_handler(Exception)
+async def _unhandled(_: Request, e: Exception):
+    log.exception("처리되지 않은 오류")
+    err = classify(e)
+    return JSONResponse(err.body(), status_code=err.status)
 
 
 def _warmup():
@@ -39,18 +80,20 @@ def _warmup():
     고객이 처음 보는 상담 첫 턴이 느리지 않도록 서버 시작 시 백그라운드로 한 번 호출해 둔다."""
     try:
         Intake(rag.llm).turn([], "", session_id=WARMUP)
-        print("[warmup] /intake 준비 완료", flush=True)
+        log.info("[warmup] /intake 준비 완료")
     except Exception as e:  # noqa: BLE001 — 워밍업 실패는 서비스에 영향 없음
-        print(f"[warmup] /intake 건너뜀: {type(e).__name__}", flush=True)
-    try:  # /architectures 스키마 4종도 미리 컴파일 (첫 요청이 수 분 걸리는 것 방지)
+        log.warning("[warmup] /intake 건너뜀: %s", type(e).__name__)
+    try:  # /architectures 스키마도 미리 컴파일 (첫 요청이 수 분 걸리는 것 방지)
         Architect(rag, n=1).run("EC2 t4g.small 1대", "워밍업", [])
-        print("[warmup] /architectures 준비 완료", flush=True)
+        log.info("[warmup] /architectures 준비 완료")
     except Exception as e:  # noqa: BLE001
-        print(f"[warmup] /architectures 건너뜀: {type(e).__name__}", flush=True)
+        log.warning("[warmup] /architectures 건너뜀: %s", type(e).__name__)
 
 
 if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
     threading.Thread(target=_warmup, daemon=True).start()
+
+# ───────────────────────── 요청 모델 ─────────────────────────
 
 
 class SearchReq(BaseModel):
@@ -63,10 +106,13 @@ class RecommendReq(BaseModel):
     infra: str = Field(description="현재 인프라 요약 (리소스 목록, CloudWatch 사용률, 비용 등 — 텍스트나 JSON 문자열)")
     goal: str = Field("", description="사용자가 원하는 구조/목표")
     priorities: list[str] = Field(default_factory=list, description="우선 최적화 방향, 예: ['cost', 'performance']")
+    constraints: Constraints | None = Field(None, description="고객 제약 (/intake recommend_request.constraints 그대로)")
 
 
 class ArchitecturesReq(RecommendReq):
     count: int = Field(5, description="추천 개수 (1~5)")
+    current_monthly_usd: float | None = Field(
+        None, description="백엔드가 분석한 현재 월 비용(USD). 주면 현재 대비 증감의 기준이 되고 AI 추정을 건너뜀")
 
 
 class ChatReq(BaseModel):
@@ -79,13 +125,45 @@ class IntakeReq(BaseModel):
     history: list[dict] = Field(default_factory=list,
                                 description='지금까지 대화 [{"role":"assistant"|"user","content":"..."}]. 첫 턴은 빈 목록')
     infra_context: str = Field("", description="백엔드가 자동 수집한 인프라 요약 (있으면 이건 다시 묻지 않음)")
-    session_id: str | None = Field(None, description="대화 로그 묶음용 ID (프론트에서 생성)")
+    session_id: str | None = Field(None, description="대화 로그 묶음용 ID (백엔드에서 생성)")
+    required_fields: list[str] | None = Field(
+        None, description=f"필수로 물어볼 profile 항목 (생략 시 기본 목록). 가능: {FIELDS}")
+
+
+# ───────────────────────── 공통 검사 ─────────────────────────
 
 
 def _check(cats):
     bad = [c for c in cats or [] if c not in CATEGORIES]
     if bad:
-        raise HTTPException(400, f"알 수 없는 category: {bad}. 가능: {CATEGORIES}")
+        raise invalid(f"알 수 없는 category: {bad}. 가능: {CATEGORIES}")
+
+
+def _check_history(history: list[dict]):
+    if any(m.get("role") not in ("user", "assistant") or not isinstance(m.get("content"), str) for m in history):
+        raise invalid('history 각 항목은 {"role": "user"|"assistant", "content": "..."} 형식이어야 합니다')
+
+
+def _need_llm():
+    if os.environ.get("LLM_BACKEND", "claude") == "claude" and not (
+            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        log.error("ANTHROPIC_API_KEY 미설정")
+        raise ApiError(500, "NOT_CONFIGURED", "AI 서버에 API 키가 설정되지 않았습니다. 관리자에게 문의하세요.")
+
+
+def _call_llm(fn, *args, **kwargs):
+    """LLM 호출 오류 → 통일된 에러. 내부 메시지는 로그에만."""
+    _need_llm()
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        err = classify(e)
+        if not isinstance(e, ApiError):
+            log.warning("LLM 호출 실패 → %s: %s: %s", err.code, type(e).__name__, e)
+        raise err from e
+
+
+# ───────────────────────── 엔드포인트 ─────────────────────────
 
 
 @app.get("/health")
@@ -101,57 +179,82 @@ def search(req: SearchReq):
                         for r, h in zip(source_refs(hits), hits)]}
 
 
-def _need_llm():
-    """LLM 이 필요한 엔드포인트에서 키가 없으면 500 대신 원인을 알려준다."""
-    if os.environ.get("LLM_BACKEND", "claude") == "claude" and not (
-            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        raise HTTPException(503, "ANTHROPIC_API_KEY 가 설정되지 않았습니다. "
-                                 "PowerShell 에서 setx ANTHROPIC_API_KEY \"sk-ant-...\" 후 창을 새로 열고 서버를 재시작하세요.")
-
-
-def _call_llm(fn, *args):
-    """Claude API 오류를 원인별 HTTP 응답으로 변환."""
-    _need_llm()
-    try:
-        return fn(*args)
-    except anthropic.AuthenticationError:
-        raise HTTPException(502, "Claude API 키가 유효하지 않습니다")
-    except anthropic.RateLimitError:
-        raise HTTPException(429, "Claude API 사용량 한도 초과 — 잠시 후 다시 시도")
-    except anthropic.APIStatusError as e:
-        raise HTTPException(502, f"Claude API 오류 ({e.status_code}): {e.message}")
-    except anthropic.APIConnectionError:
-        raise HTTPException(502, "Claude API 에 연결할 수 없습니다 (네트워크 확인)")
-    except RuntimeError as e:
-        raise HTTPException(502, str(e))
-
-
 @app.post("/recommend")
 def recommend(req: RecommendReq):
     _check(req.priorities)
-    return _call_llm(rag.recommend, req.infra, req.goal, req.priorities)
+    ctext = constraints_text(req.constraints)
+    infra = req.infra + (f"\n\n[고객 제약]\n{ctext}" if ctext else "")
+    return _call_llm(rag.recommend, infra, req.goal, req.priorities)
 
 
 @app.post("/architectures")
 def architectures(req: ArchitecturesReq):
     _check(req.priorities)
     if not 1 <= req.count <= 5:
-        raise HTTPException(400, "count 는 1~5")
-    return _call_llm(Architect(rag, n=req.count).run, req.infra, req.goal, req.priorities)
+        raise invalid("count 는 1~5")
+    if req.current_monthly_usd is not None and req.current_monthly_usd <= 0:
+        raise invalid("current_monthly_usd 는 0 보다 커야 합니다")
+    return _call_llm(Architect(rag, n=req.count).run, req.infra, req.goal, req.priorities,
+                     constraints=req.constraints, current_monthly_usd=req.current_monthly_usd)
 
 
 @app.post("/intake")
 def intake(req: IntakeReq):
-    bad = [m for m in req.history if m.get("role") not in ("user", "assistant") or not isinstance(m.get("content"), str)]
-    if bad:
-        raise HTTPException(400, 'history 각 항목은 {"role": "user"|"assistant", "content": "..."} 형식이어야 합니다')
-    return _call_llm(lambda: Intake(rag.llm).turn(req.history, req.infra_context, req.session_id))
+    _check_history(req.history)
+    if req.required_fields is not None:
+        bad = [f for f in req.required_fields if f not in FIELDS]
+        if bad or not req.required_fields:
+            raise invalid(f"required_fields 에 알 수 없는 항목: {bad}. 가능: {FIELDS}" if bad
+                          else "required_fields 는 비울 수 없습니다 (생략하면 기본 목록)")
+    return _call_llm(lambda: Intake(rag.llm).turn(req.history, req.infra_context, req.session_id,
+                                                  required=req.required_fields))
+
+
+def _line(obj: dict) -> bytes:
+    return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
 
 @app.post("/chat")
 def chat(req: ChatReq):
+    """NDJSON 스트리밍 (한 줄 = JSON 한 개):
+        {"type":"sources","sources":[...]}
+        {"type":"delta","text":"..."}          (여러 번)
+        {"type":"done","refused":false}        또는 스트림 도중 오류 시 {"type":"error","code",...}
+    첫 토큰 전에 실패하면 일반 에러 응답(HTTP 4xx/5xx)으로 돌려준다."""
     _check(req.categories)
-    _need_llm()
-    sources, stream = rag.chat_stream(req.question, req.history, req.categories)
-    return StreamingResponse(stream, media_type="text/plain; charset=utf-8",
-                             headers={"X-Sources": urllib.parse.quote(json.dumps(sources, ensure_ascii=False))})
+    _check_history(req.history)
+    sources, stream = _call_llm(rag.chat_stream, req.question, req.history, req.categories)
+
+    first: str | None = None
+    finished = refused = False
+    try:  # 첫 조각까지 미리 받아서, 시작 전 실패는 HTTP 상태코드로 알린다
+        first = next(stream)
+    except StopIteration:
+        finished = True
+    except Exception as e:  # noqa: BLE001
+        err = classify(e)
+        if err.code != "REFUSED":
+            log.warning("chat 시작 실패 → %s: %s", err.code, e)
+            raise err from e
+        finished = refused = True
+
+    def body():
+        yield _line({"type": "sources", "sources": sources})
+        if first:
+            yield _line({"type": "delta", "text": first})
+        if finished:
+            yield _line({"type": "done", "refused": refused})
+            return
+        try:
+            for t in stream:
+                yield _line({"type": "delta", "text": t})
+            yield _line({"type": "done", "refused": False})
+        except Exception as e:  # noqa: BLE001
+            err = classify(e)
+            if err.code == "REFUSED":
+                yield _line({"type": "done", "refused": True})
+            else:
+                log.warning("chat 스트림 중 오류 → %s: %s", err.code, e)
+                yield _line({"type": "error", **err.body()})
+
+    return StreamingResponse(body(), media_type="application/x-ndjson; charset=utf-8")

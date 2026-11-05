@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -19,10 +21,16 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from cost import estimate
+from cost import estimate, load_pricing
+from errors import ApiError, classify
 from generator import RAG, format_sources, source_refs
 from layout import layout
-from schemas import ArchitectureDraft, CurrentInfra
+from schemas import ArchitectureDraft, Constraints, CurrentInfra
+
+log = logging.getLogger("kkari")
+REGION = "ap-northeast-2"
+OTHER_REGION = re.compile(r"\b(?!ap-northeast-2\b)(?:us|eu|ap|sa|ca|me|af|il|mx)-[a-z]+-\d\b|도쿄|오사카|싱가포르|시드니|뭄바이|"
+                          r"버지니아|오하이오|오레곤|오리건|캘리포니아|프랑크푸르트|아일랜드|런던|파리|홍콩|자카르타", re.I)
 
 # ───────────────────────── Claude 출력 스키마 (B 내부용) ─────────────────────────
 
@@ -111,7 +119,13 @@ SYSTEM_DRAFT = COMMON + """
 - <다른_후보> 의 대표 변경(signature)은 이 안에 넣지 않는다 (예: 다른 후보가 'Graviton 전환'이면 이 안은 현재
   인스턴스 패밀리 계열을 유지하거나 이 방향에 맞는 다른 선택을 한다).
 - 단, 고객의 필수 요구(가용성 목표·규제)를 못 지키게 되면 최소한으로만 쓰고 cons 에 그 사실을 적는다.
-- name 과 pros/cons 는 이 안의 대표 변경을 중심으로 쓴다."""
+- name 과 pros/cons 는 이 안의 대표 변경을 중심으로 쓴다.
+
+[고객 제약 규칙] — <고객_제약> 이 있으면 반드시 지킨다
+- 변경 금지 리소스는 타입·엔진·버전·위치를 그대로 두고 도식에도 그대로 넣는다. 지킬 수 없으면 constraint_checks 에
+  satisfied=false 로 솔직히 적는다.
+- 개인정보를 다루면 저장소 암호화(KMS)·전송 구간 TLS·접근 통제·로그 보존을 설계에 반영하고 constraint_checks 에 점검 결과를 적는다.
+- 월 예산이 있으면 그 안에 들어오도록 규모를 정한다 (비용은 코드가 계산해 예산 초과 여부를 따로 확인한다)."""
 
 SYSTEM_CURRENT = COMMON + """
 고객의 현재 인프라를 비용 계산용 노드 목록으로 옮긴다 (설계 변경 없이 있는 그대로).
@@ -123,7 +137,58 @@ SYSTEM_RANK = COMMON + """
 후보 아키텍처들을 비교해 순위를 정한다. 비용은 코드가 가격표로 계산한 값이니 그대로 믿고 쓴다.
 - 고객 우선순위를 가장 크게 반영하고, 변경 허용 범위·제약(규제, 다운타임)을 어기는 안은 순위를 낮춘다.
 - 점수는 후보끼리 상대 비교로 매긴다 (모두 같은 점수 금지). rank 는 1부터 겹치지 않게.
-- 이유는 계산된 월 비용과 현재 대비 증감을 숫자로 인용한다."""
+- 이유는 계산된 월 비용과 현재 대비 증감을 숫자로 인용한다.
+- <제약_위반> 이 있는 후보는 위반이 없는 후보보다 아래 순위로 두고, 이유에 위반 내용을 밝힌다."""
+
+
+def budget_usd(c: Constraints | None) -> float | None:
+    """월 예산을 USD 로. 예산 없음(0)·모름(None)이면 None."""
+    if not c or not c.monthly_budget:
+        return None
+    return c.monthly_budget / c.krw_per_usd if c.currency == "KRW" else c.monthly_budget
+
+
+def constraints_text(c: Constraints | None) -> str:
+    if c is None:
+        return ""
+    lines = []
+    if c.monthly_budget:
+        usd = budget_usd(c)
+        lines.append(f"- 월 예산: {c.monthly_budget:,.0f} {c.currency or 'USD'}"
+                     + (f" (약 ${usd:,.0f}, 환율 {c.krw_per_usd:,.0f}원/$)" if c.currency == "KRW" else ""))
+    elif c.monthly_budget == 0:
+        lines.append("- 월 예산: 정해진 상한 없음")
+    if c.contains_personal_data is not None:
+        lines.append(f"- 개인정보 포함: {'예' if c.contains_personal_data else '아니오'}")
+    if c.frozen_resources:
+        lines.append("- 변경 금지 리소스: " + "; ".join(c.frozen_resources))
+    return "\n".join(lines)
+
+
+def violations(draft: ArchitectureDraft, cost, c: Constraints | None) -> list[dict]:
+    """예산은 코드가 계산값으로 확인, 변경 금지·개인정보는 AI 자체 점검 결과에서 위반만 모은다."""
+    out = []
+    limit = budget_usd(c)
+    if limit and cost.monthly_total_usd > limit:
+        out.append({"constraint": "monthly_budget", "checked_by": "code",
+                    "detail": f"월 ${cost.monthly_total_usd:,.0f} 로 예산 ${limit:,.0f} 를 "
+                              f"${cost.monthly_total_usd - limit:,.0f} 초과"})
+    wanted = set()
+    if c and c.frozen_resources:
+        wanted.add("frozen_resources")
+    if c and c.contains_personal_data:
+        wanted.add("personal_data")
+    for chk in draft.constraint_checks:
+        if chk.constraint in wanted and not chk.satisfied:
+            out.append({"constraint": chk.constraint, "checked_by": "ai", "detail": chk.detail})
+    return out
+
+
+def region_warnings(infra: str) -> list[str]:
+    found = sorted({m.group(0) for m in OTHER_REGION.finditer(infra)})
+    if not found:
+        return []
+    return [f"인프라 설명에 서울 외 리전({', '.join(found)})이 있지만 비용은 서울 리전(ap-northeast-2) 가격으로 계산했습니다."]
 
 
 def _distinct(dirs: list[Direction], n: int) -> list[Direction]:
@@ -152,15 +217,20 @@ class Architect:
     def llm(self):
         return self.rag.llm
 
-    def run(self, infra: str, goal: str = "", priorities: list[str] | None = None) -> dict:
+    def run(self, infra: str, goal: str = "", priorities: list[str] | None = None,
+            constraints: Constraints | None = None, current_monthly_usd: float | None = None) -> dict:
+        """current_monthly_usd: 백엔드가 분석한 현재 월 비용(USD). 주면 현재 대비 증감의 기준으로 쓰고
+        현재 인프라를 다시 추정하지 않는다 (Claude 호출 1회 절약)."""
         t0 = time.time()
         timings = {}
         priorities = priorities or []
         hits = self.rag.gather(infra, goal, priorities, k=16)
+        ctext = constraints_text(constraints)
         ctx = "\n\n".join([
             _block("현재_인프라", infra),
             _block("원하는_방향", goal or "(명시 안 됨)"),
             f"<우선순위>{', '.join(priorities) or '(없음)'}</우선순위>",
+            *([_block("고객_제약", ctext)] if ctext else []),
             _block("자료", format_sources(hits)),
         ])
         timings["search"] = time.time() - t0
@@ -178,33 +248,45 @@ class Architect:
             return self.llm.structured(SYSTEM_DRAFT, user, ArchitectureDraft, effort="medium")
 
         with ThreadPoolExecutor(max_workers=self.n + 1) as pool:
-            current_f = pool.submit(self.llm.structured, SYSTEM_CURRENT, _block("현재_인프라", infra),
-                                    CurrentInfra, "low")
+            current_f = None if current_monthly_usd else pool.submit(
+                self.llm.structured, SYSTEM_CURRENT, _block("현재_인프라", infra), CurrentInfra, "low")
             draft_fs = [pool.submit(draft, d) for d in directions]
-            drafts, failed = [], []
+            drafts, failed, errors = [], [], []
             for d, f in zip(directions, draft_fs):
                 try:
                     drafts.append((d, f.result()))
                 except Exception as e:  # noqa: BLE001 — 한 안이 실패해도 나머지는 보여준다
-                    failed.append(f"{d.title}: {type(e).__name__}: {e}")
-            if not drafts:
-                raise RuntimeError("아키텍처를 하나도 생성하지 못했습니다: " + " / ".join(failed))
-            try:
-                current = current_f.result()
-            except Exception:  # noqa: BLE001
-                current = None
+                    log.exception("아키텍처 생성 실패: %s", d.title)
+                    err = classify(e)
+                    errors.append(err)
+                    failed.append({"title": d.title, "code": err.code})
+            if not drafts:  # 전부 실패 → 첫 원인 그대로 (재시도 가능 여부가 유지되게)
+                raise errors[0] if errors else ApiError(502, "GENERATION_FAILED", "아키텍처를 생성하지 못했습니다.")
+            current = None
+            if current_f is not None:
+                try:
+                    current = current_f.result()
+                except Exception:  # noqa: BLE001 — 현재 비용 추정 실패는 비교만 빠짐
+                    log.exception("현재 인프라 추정 실패")
         timings["drafts"] = time.time() - t0
 
-        cur_cost = estimate(current.nodes) if current else None
-        cur_total = cur_cost.monthly_total_usd if cur_cost and cur_cost.monthly_total_usd > 0 else None
+        est_cost = estimate(current.nodes) if current else None
+        if current_monthly_usd:
+            baseline, baseline_source = float(current_monthly_usd), "input"
+        elif est_cost and est_cost.monthly_total_usd > 0:
+            baseline, baseline_source = est_cost.monthly_total_usd, "estimated"
+        else:
+            baseline, baseline_source = None, None
+
         cands = []
         for direction, d in drafts:
             c = estimate(d.diagram.nodes)
             diff = None
-            if cur_total and c.monthly_total_usd > 0:
-                diff = {"usd": round(c.monthly_total_usd - cur_total, 2),
-                        "pct": round((c.monthly_total_usd - cur_total) / cur_total * 100, 1)}
-            cands.append({"direction": direction, "draft": d, "cost": c, "vs_current": diff, "layout": layout(d.diagram)})
+            if baseline and c.monthly_total_usd > 0:
+                diff = {"usd": round(c.monthly_total_usd - baseline, 2),
+                        "pct": round((c.monthly_total_usd - baseline) / baseline * 100, 1)}
+            cands.append({"direction": direction, "draft": d, "cost": c, "vs_current": diff,
+                          "violations": violations(d, c, constraints), "layout": layout(d.diagram)})
 
         def money(c) -> str:  # 계산된 항목이 하나도 없으면 $0 이 아니라 "계산 불가"
             if not any(it.monthly_usd is not None for it in c["cost"].items):
@@ -216,16 +298,21 @@ class Architect:
             f"월 비용(계산): {money(c)}"
             + (f" (현재 대비 {c['vs_current']['pct']:+.1f}%)" if c["vs_current"] else "")
             + (f", 추정 불가 항목: {', '.join(c['cost'].unpriced)}" if c["cost"].unpriced else "")
+            + (("\n<제약_위반>" + " / ".join(v["detail"] for v in c["violations"]) + "</제약_위반>")
+               if c["violations"] else "")
             + f"\n장점: {' / '.join(c['draft'].pros)}\n단점: {' / '.join(c['draft'].cons)}"
             for i, c in enumerate(cands))
-        cur_line = f"${cur_total:,.0f}" if cur_total else "(계산 불가)"
-        rank_user = (ctx.split("<자료>")[0] + f"<현재_월비용_계산>{cur_line}</현재_월비용_계산>\n\n"
+        cur_line = (f"${baseline:,.0f} ({'고객 제공' if baseline_source == 'input' else '구성으로 추정'})"
+                    if baseline else "(계산 불가)")
+        rank_user = (ctx.split("<자료>")[0] + f"<현재_월비용>{cur_line}</현재_월비용>\n\n"
                      + _block("후보", summary))
         ranking: Ranking = self.llm.structured(SYSTEM_RANK, rank_user, Ranking, effort="medium")
         timings["rank"] = time.time() - t0
 
         by_index = {it.index: it for it in ranking.items if 0 <= it.index < len(cands)}
-        order = sorted(range(len(cands)), key=lambda i: (by_index[i].rank if i in by_index else 99, i))
+        # 제약 위반 안은 모델 순위와 관계없이 위반 없는 안보다 뒤로 (보장)
+        order = sorted(range(len(cands)), key=lambda i: (bool(cands[i]["violations"]),
+                                                          by_index[i].rank if i in by_index else 99, i))
         architectures = []
         for rank, i in enumerate(order, 1):  # 모델이 순위를 겹치게 줘도 1..N 으로 다시 매김
             c, it = cands[i], by_index.get(i)
@@ -238,16 +325,24 @@ class Architect:
                 "best_for": it.best_for if it else "",
                 "scores": it.scores.model_dump() if it else None,
                 **c["draft"].model_dump(),
+                "violations": c["violations"],
                 "cost": c["cost"].model_dump(),
                 "vs_current": c["vs_current"],
                 "layout": c["layout"].model_dump(),
             })
+        pricing = load_pricing(REGION)
         return {
             "overall": ranking.overall,
-            "current": {"cost": cur_cost.model_dump() if cur_cost else None,
+            "current": {"monthly_usd": round(baseline, 2) if baseline else None,
+                        "source": baseline_source,
+                        "estimated_cost": est_cost.model_dump() if est_cost else None,
                         "nodes": [n.model_dump() for n in current.nodes] if current else []},
+            "constraints": constraints.model_dump() if constraints else None,
             "architectures": architectures,
             "sources": source_refs(hits),
+            "pricing": {"region": pricing.get("region", REGION), "built": pricing.get("built"),
+                        "currency": "USD", "basis": "온디맨드, RI·Savings Plans·프리티어 미적용"},
+            "warnings": region_warnings(infra),
             "failed": failed,
             "timings_s": {k: round(v, 1) for k, v in timings.items()},
         }
