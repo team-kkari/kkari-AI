@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import anthropic
 import pytest
 
-from architect import Architect, Directions, Ranking, budget_usd, region_warnings, violations
+from architect import (Architect, Directions, Ranking, budget_usd, constraint_warnings, constraints_text,
+                       region_warnings, violations)
 from conftest import FakeLLM, FakeRetriever, api_status_error, direction_of, directions, ranking, sample_draft
 from errors import ApiError, LLMOutputError
 from generator import RAG
@@ -27,6 +28,15 @@ def test_budget_usd_as_is():
                                Constraints(monthly_budget=None, currency="USD")])
 def test_budget_none_or_zero(c):
     assert budget_usd(c) is None
+
+
+def test_budget_without_currency_not_guessed():
+    """통화가 없으면 USD 로 추측하지 않는다 (원화 300만 원이 $3,000,000 으로 읽히는 것 방지)."""
+    c = Constraints(monthly_budget=3_000_000)
+    assert budget_usd(c) is None
+    assert violations(draft_with(), cost(10**7), c) == []
+    assert "통화 미확인" in constraints_text(c) and "USD" not in constraints_text(c)
+    assert constraint_warnings(c) and constraint_warnings(Constraints(monthly_budget=1, currency="USD")) == []
 
 
 # ───────────────────────── violations ─────────────────────────
@@ -162,6 +172,34 @@ def test_partial_failure_reported():
     out = run(make_llm(drafts))
     assert out["failed"] == [{"title": "안 B", "code": "RATE_LIMITED"}]
     assert [a["name"] for a in out["architectures"]] == ["안 A", "안 C"]
+
+
+def test_ranking_failure_falls_back_to_cost_order():
+    base = sample_draft()
+    nodes = base.diagram.nodes
+    cheap = base.model_copy(update={"name": "안 B", "diagram": base.diagram.model_copy(update={"nodes": nodes[:4]})})
+    drafts = {"안 A": sample_draft("안 A"), "안 B": cheap, "안 C": sample_draft("안 C")}
+    llm = make_llm(drafts)
+    llm.responses[Ranking] = api_status_error(anthropic.RateLimitError, 429)
+    out = run(llm, current_monthly_usd=1000)
+    archs = out["architectures"]
+    assert len(archs) == 3 and archs[0]["name"] == "안 B"  # 가장 싼 안이 먼저
+    totals = [a["cost"]["monthly_total_usd"] for a in archs]
+    assert totals == sorted(totals)
+    assert [a["rank"] for a in archs] == [1, 2, 3]
+    assert all(a["scores"] is None and a["rank_reason"] == "" for a in archs)
+    assert out["overall"] == ""
+    assert any("RATE_LIMITED" in w for w in out["warnings"])
+
+
+def test_ranking_failure_still_puts_violations_last():
+    drafts = {t: sample_draft(t) for t in TITLES}
+    drafts["안 A"] = sample_draft("안 A", constraint_checks=[
+        ConstraintCheck(constraint="personal_data", satisfied=False, detail="암호화 없음")])
+    llm = make_llm(drafts)
+    llm.responses[Ranking] = LLMOutputError("잘림")
+    out = run(llm, constraints=Constraints(contains_personal_data=True))
+    assert out["architectures"][-1]["name"] == "안 A"
 
 
 def test_all_failed_raises_first_error():

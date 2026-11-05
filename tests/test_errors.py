@@ -61,7 +61,15 @@ def test_500_not_configured(client, llm, monkeypatch, path, payload):
 
 
 def test_404(client):
-    assert_error_shape(client.get("/nope"), 404, "INVALID_REQUEST")
+    body = assert_error_shape(client.get("/nope"), 404, "NOT_FOUND")
+    assert body["message"] != "Not Found"  # Starlette 원문 대신 고정 문구
+
+
+def test_405(client):
+    r = client.get("/chat")
+    body = assert_error_shape(r, 405, "METHOD_NOT_ALLOWED")
+    assert body["message"] != "Method Not Allowed"
+    assert r.headers["allow"] == "POST"  # 원래 헤더는 유지
 
 
 def test_llm_error_hides_internal_message(client, llm):

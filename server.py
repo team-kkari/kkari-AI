@@ -62,10 +62,18 @@ async def _validation_error(_: Request, e: RequestValidationError):
                          "retryable": False, "errors": errs}, status_code=422)
 
 
+HTTP_ERRORS = {  # 프레임워크가 내는 HTTP 오류 → 고정 문구 (Starlette 원문 "Not Found" 등은 노출하지 않음)
+    404: ("NOT_FOUND", "요청한 경로가 없습니다."),
+    405: ("METHOD_NOT_ALLOWED", "이 경로에서 지원하지 않는 HTTP 메서드입니다."),
+}
+
+
 @app.exception_handler(StarletteHTTPException)
-async def _http_error(_: Request, e: StarletteHTTPException):  # 404, 405 등
-    return JSONResponse({"code": "INVALID_REQUEST" if e.status_code < 500 else "INTERNAL_ERROR",
-                         "message": str(e.detail), "retryable": False}, status_code=e.status_code)
+async def _http_error(_: Request, e: StarletteHTTPException):
+    code, message = HTTP_ERRORS.get(e.status_code) or (
+        ("INVALID_REQUEST", "잘못된 요청입니다.") if e.status_code < 500 else ("INTERNAL_ERROR", "서버 내부 오류가 발생했습니다."))
+    return JSONResponse({"code": code, "message": message, "retryable": False},
+                        status_code=e.status_code, headers=getattr(e, "headers", None))
 
 
 @app.exception_handler(Exception)

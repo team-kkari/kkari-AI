@@ -7,6 +7,8 @@
 | code                  | HTTP | retryable | 언제 |
 |-----------------------|------|-----------|------|
 | INVALID_REQUEST       | 400  | false     | 잘못된 값 (category, count, history 형식 등) |
+| NOT_FOUND             | 404  | false     | 없는 경로 |
+| METHOD_NOT_ALLOWED    | 405  | false     | 경로는 있지만 지원하지 않는 HTTP 메서드 |
 | VALIDATION_ERROR      | 422  | false     | 필수 필드 누락·타입 오류 (errors 에 필드별 상세) |
 | REFUSED               | 422  | false     | 모델이 정책상 거절 — 같은 요청은 다시 보내도 거절됨 |
 | RATE_LIMITED          | 429  | true      | Claude API 사용량 한도 — 잠시 후 재시도 |

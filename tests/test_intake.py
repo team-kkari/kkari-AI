@@ -61,6 +61,10 @@ def test_missing_only_checks_given_fields():
     assert "security" not in missing(p, ["traffic"])
 
 
+def test_missing_empty_required_is_empty():
+    assert missing(Profile(), []) == []  # 빈 목록을 기본 목록으로 바꾸지 않음
+
+
 def test_intake_endpoint_uses_required_fields(client, llm):
     llm.responses[Turn] = TURN.model_copy(update={"profile": llm_profile(workload="쇼핑몰")})
     r = client.post("/intake", json={"required_fields": ["workload", "traffic"]})

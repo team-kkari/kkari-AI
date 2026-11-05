@@ -148,7 +148,7 @@ def is_filled(p: Profile, key: str) -> bool:
 
 
 def missing(p: Profile, required: list[str] | None = None) -> list[str]:
-    return [k for k in (required or REQUIRED) if not is_filled(p, k)]
+    return [k for k in (REQUIRED if required is None else required) if not is_filled(p, k)]
 
 
 def to_recommend_request(p: Profile, infra_context: str = "") -> dict:
@@ -166,7 +166,7 @@ class Intake:
 
     def turn(self, history: list[dict], infra_context: str = "", session_id: str | None = None,
              required: list[str] | None = None) -> dict:
-        required = required or REQUIRED
+        required = REQUIRED if required is None else required
         convo = "\n".join(f"{'상담원' if m['role'] == 'assistant' else '고객'}: {m['content']}" for m in history)
         user = (f"<자동_수집_인프라>\n{infra_context or '(없음)'}\n</자동_수집_인프라>\n\n"
                 f"<대화>\n{convo or '(아직 없음 — 첫 턴)'}\n</대화>\n\n"
