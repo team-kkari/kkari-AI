@@ -1131,3 +1131,13 @@ def generate(diagram: Diagram, name: str = "kkari", constraints: Constraints | N
     g = _Gen(diagram, name, constraints)
     files = g.build()
     return {"project": g.project, "files": files, "warnings": g.warnings}
+
+
+def combine(out: dict) -> str:
+    """파일 여러 개 → .tf 하나 (Terraform 은 폴더의 .tf 를 모두 합쳐 읽으므로 동작이 같다). 할 일은 맨 위 주석으로."""
+    head = f"# {out['project']}.tf — kkari-AI 가 생성한 Terraform 초안 (versions·variables·main·outputs 를 한 파일로 합침)\n"
+    if out["warnings"]:
+        head += "#\n# 사람이 채워야 할 항목:\n" + "".join(f"#   - {w}\n" for w in out["warnings"])
+    parts = [f"# ───────── {name} ─────────\n\n{out['files'][name].strip()}"
+             for name in ("versions.tf", "variables.tf", "main.tf", "outputs.tf")]
+    return head + "\n" + "\n\n".join(parts) + "\n"

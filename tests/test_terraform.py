@@ -146,3 +146,31 @@ def test_serverless_aurora_validates(tmp_path):
         pytest.skip("terraform init 실패 (네트워크)")
     v = run("validate", "-no-color")
     assert v.returncode == 0, v.stdout + v.stderr
+
+
+def test_endpoint_single_tf_file(client):
+    a = load("architecture_3tier").model_dump()
+    r = client.post("/terraform", json={**a, "format": "tf"})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/plain")
+    assert r.headers["content-disposition"].endswith('.tf"')
+    body = r.text
+    for part in ("terraform {", 'variable "region"', 'resource "aws_vpc" "main"', 'output "'):
+        assert part in body
+    assert "README" not in body and "사람이 채워야 할 항목" in body
+
+
+@pytest.mark.skipif(not TF, reason="terraform CLI 없음 (TERRAFORM_BIN 으로 지정 가능)")
+def test_single_tf_file_validates(tmp_path):
+    from terraform_gen import combine
+    a = load("architecture_3tier")
+    out = generate(a.diagram, a.name)
+    (tmp_path / f"{out['project']}.tf").write_text(combine(out), encoding="utf-8")
+    env = {**os.environ, "TF_PLUGIN_CACHE_DIR": os.environ.get("TF_PLUGIN_CACHE_DIR", str(Path.home() / ".terraform.d" / "plugin-cache"))}
+    Path(env["TF_PLUGIN_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
+    run = lambda *x: subprocess.run([TF, *x], cwd=tmp_path, env=env, capture_output=True, text=True)  # noqa: E731
+    fmt = run("fmt", "-check", "-diff")
+    assert fmt.returncode == 0, fmt.stdout
+    if run("init", "-backend=false", "-input=false").returncode != 0:
+        pytest.skip("terraform init 실패 (네트워크)")
+    v = run("validate", "-no-color")
+    assert v.returncode == 0, v.stdout + v.stderr
