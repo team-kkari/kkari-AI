@@ -119,3 +119,20 @@ def test_company_name_is_required_first_and_mapped():
     assert "company_name" not in missing(Profile(company_name="카리상사"))
     assert llm_profile().to_profile().company_name is None
     assert llm_profile(company_name="카리상사").to_profile().company_name == "카리상사"
+
+
+def test_ready_forced_false_while_required_missing():
+    """모델이 ready=true 라고 해도 필수(고객사명 등)가 남아 있으면 false. 고객이 건너뛰자고 하면 true."""
+    from intake import decide_ready, skip_requested
+    h = [{"role": "user", "content": "모든 전환 가능하고 비용 최우선이에요"}]
+    assert decide_ready(True, ["company_name"], h) is False
+    assert decide_ready(True, [], h) is True and decide_ready(False, [], h) is False
+    for msg in ("고객사명은 나중에, 바로 진단해 주세요", "그냥 진행해 주세요", "검토 시작해 주세요", "그건 건너뛸게요", "다음으로 넘어갈게요"):
+        assert skip_requested([{"role": "user", "content": msg}]), msg
+        assert decide_ready(True, ["company_name"], [{"role": "user", "content": msg}]) is True
+
+
+def test_intake_endpoint_ready_false_when_company_missing(client, llm):
+    llm.responses[Turn] = TURN.model_copy(update={"ready": True, "profile": llm_profile(workload="데이터 파이프라인")})
+    j = client.post("/intake", json={"history": [{"role": "user", "content": "비용 최우선이에요"}]}).json()
+    assert j["ready"] is False and j["recommend_request"] is None and "company_name" in j["missing_fields"]

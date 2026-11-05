@@ -146,3 +146,11 @@ def test_consult_files_endpoint(client, llm):
 def test_consult_rejects_bad_history(client):
     r = client.post("/consult", json={"history": [{"role": "bot", "content": "x"}]})
     assert r.status_code == 400
+
+
+def test_consult_ready_forced_false_while_required_missing(client, llm):
+    llm.responses[ConsultTurn] = _turn(profile={**FULL, "aws_connection": "not_asked"}, ready=True)
+    j = client.post("/consult", json={"history": [{"role": "user", "content": "외주 업체가 관리해요"}]}).json()
+    assert j["ready"] is False and j["missing"] == ["Q15"] and j["recommend_request"] is None
+    j = client.post("/consult", json={"history": [{"role": "user", "content": "연결은 됐고 바로 검토해 주세요"}]}).json()
+    assert j["ready"] is True and j["recommend_request"] is not None
