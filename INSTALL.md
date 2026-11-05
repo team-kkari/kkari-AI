@@ -134,6 +134,7 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
 - 흐름: `/intake` 반복 → `ready: true` → `recommend_request` 를 `/architectures` 로 보내 추천 생성
+- profile 의 `company_name`(고객사명)은 기본 필수 항목이라 첫 질문에서 함께 묻는다 (첫 입력에 있으면 자동 추출)
 - profile 의 제약 필드 (타입 고정): `monthly_budget`(number, 0=예산 없음), `currency`(`USD`|`KRW`), `contains_personal_data`(bool),
   `frozen_resources`(string[], `[]`=없음). null 은 아직 모름
 - 요청에 `required_fields: ["workload", "monthly_budget", ...]` 를 주면 필수 질문 목록을 바꿀 수 있다. 응답 `missing_fields` 는 영문 키
