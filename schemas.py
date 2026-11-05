@@ -113,6 +113,25 @@ class Diagram(BaseModel):
     edges: list[Edge]
 
 
+# ───────────────────────── 고객 제약 (요청 입력) ─────────────────────────
+
+
+class Constraints(BaseModel):
+    """/intake 의 recommend_request.constraints 와 같은 형식. 모두 선택."""
+    monthly_budget: float | None = Field(None, description="월 예산. 0 = 정해진 예산 없음, null = 모름")
+    currency: Literal["USD", "KRW"] | None = Field(None, description="monthly_budget 통화")
+    contains_personal_data: bool | None = Field(None, description="개인정보 저장·처리 여부")
+    frozen_resources: list[str] | None = Field(None, description="변경하면 안 되는 리소스")
+    krw_per_usd: float = Field(1400, description="currency=KRW 일 때 쓰는 환율 (원/달러)")
+
+
+class ConstraintCheck(BaseModel):
+    """설계한 안이 고객 제약을 지켰는지 AI 가 스스로 점검한 결과."""
+    constraint: Literal["frozen_resources", "personal_data"]
+    satisfied: bool = Field(description="제약을 지켰으면 true")
+    detail: str = Field(description="어떻게 지켰는지 또는 무엇을 어겼는지 한 문장 (예: 'RDS prod-db 엔진 버전 유지')")
+
+
 # ───────────────────────── Claude 가 생성하는 아키텍처 (B 파트) ─────────────────────────
 
 
@@ -126,6 +145,8 @@ class ArchitectureDraft(BaseModel):
     diagram: Diagram
     sources: list[int] = Field(description="근거로 쓴 [자료 번호]")
     bp_ids: list[str] = Field(description="근거 BP ID (예: COST06-BP03)")
+    constraint_checks: list[ConstraintCheck] = Field(default_factory=list, description=(
+        "<고객_제약> 에 변경 금지 리소스나 개인정보 포함이 있으면 각각 점검 결과 1개씩. 해당 제약이 없으면 빈 목록"))
 
 
 class CurrentInfra(BaseModel):
