@@ -53,22 +53,27 @@ class Profile(BaseModel):
     constraints: str | None = Field(None, description="제약: 규제·컴플라이언스, 리전 고정, 기술 스택 제한")
     operations: str | None = Field(None, description="운영 체계: IaC(Terraform 등), 모니터링, 배포 방식, 운영 인력")
     security: str | None = Field(None, description="보안 요구: 데이터 민감도, 암호화, 접근 통제")
+    design_principles: str | None = Field(None, description=(
+        "이 회사가 아키텍처를 설계할 때 지키는 원칙·꼭 고려할 점. 예: 'Multi-AZ 필수', '관리형 서비스 우선', "
+        "'서버리스 선호', 'Terraform 으로만 배포', '특정 리전 고정', '사내 보안 표준(암호화·접근 통제)', "
+        "'운영 인력 2명이라 단순한 구조', '벤더 종속 최소화'. 특별한 원칙이 없다고 하면 '특별한 원칙 없음'"))
 
 
 REQUIRED = ["company_name", "workload", "architecture", "traffic", "availability", "cost", "monthly_budget",
-            "contains_personal_data", "frozen_resources", "priorities", "change_tolerance"]
+            "contains_personal_data", "frozen_resources", "priorities", "design_principles", "change_tolerance"]
 LABELS = {
     "company_name": "고객사명", "workload": "워크로드", "architecture": "현재 구성", "traffic": "트래픽", "availability": "가용성 목표",
     "performance": "성능 요구", "cost": "현재 비용", "monthly_budget": "월 예산", "currency": "예산 통화",
     "contains_personal_data": "개인정보 포함 여부", "frozen_resources": "변경 금지 리소스", "goal": "목표",
     "priorities": "우선순위", "change_tolerance": "변경 허용 범위", "constraints": "제약", "operations": "운영 체계",
-    "security": "보안 요구",
+    "security": "보안 요구", "design_principles": "설계 원칙·고려사항",
 }
 # 인프라 상태별 기본 필수 항목. 고객사명은 의뢰를 만들 때 이미 받았으므로 묻지 않는다.
 #  EXISTING: 계정 연결로 구성·트래픽·비용을 자동 수집했으므로 가치(우선순위)와 예산만 묻는다.
 #  NONE: 기존 인프라가 없으므로 현재 구성·비용·변경 금지 리소스 대신 만들 서비스를 묻는다.
-REQUIRED_EXISTING = ["monthly_budget", "priorities"]
-REQUIRED_NEW = ["workload", "traffic", "availability", "monthly_budget", "contains_personal_data", "priorities"]
+REQUIRED_EXISTING = ["monthly_budget", "priorities", "design_principles"]
+REQUIRED_NEW = ["workload", "traffic", "availability", "monthly_budget", "contains_personal_data", "priorities",
+                "design_principles"]
 FIELDS = list(Profile.model_fields)  # required_fields 로 지정 가능한 키
 CONSTRAINT_FIELDS = ["monthly_budget", "currency", "contains_personal_data", "frozen_resources"]
 
@@ -94,6 +99,9 @@ class ProfileLLM(BaseModel):
     constraints: str = Field(description="기타 제약: 규제·컴플라이언스, 리전 고정, 기술 스택 제한. 모르면 빈 문자열")
     operations: str = Field(description="운영 체계: IaC(Terraform 등), 모니터링, 배포 방식, 운영 인력. 모르면 빈 문자열")
     security: str = Field(description="보안 요구: 데이터 민감도, 암호화, 접근 통제. 모르면 빈 문자열")
+    design_principles: str = Field(description=(
+        "이 회사가 아키텍처를 설계할 때 지키는 원칙·꼭 고려할 점 (예: 'Multi-AZ 필수, 관리형 서비스 우선, 리전 고정'). "
+        "고객이 말한 그대로 요약. 특별한 원칙이 없다고 하면 '특별한 원칙 없음'. 아직 안 물어봤으면 빈 문자열"))
 
     def to_profile(self) -> Profile:
         d = self.model_dump()
@@ -127,6 +135,9 @@ SYSTEM_TMPL = """너는 클라우드 인프라 관리 서비스의 초기 상담
 - 이미 확인된 값은 매 턴 그대로 다시 채운다 (이전 턴 프로필은 저장되지 않으므로 대화 전체에서 다시 읽어 채운다).
 - 개인정보 포함 여부는 예/아니오로 확인한다. 변경 금지 리소스는 "절대 바꾸면 안 되는 리소스(엔진·버전·네트워크 연동 등)"가
   있는지 묻고, 없다고 하면 frozen_resources 를 빈 목록 [] 으로 한다.
+- 설계 원칙·고려사항(design_principles)은 회사마다 다르므로 반드시 묻는다. "아키텍처를 설계할 때 회사에서 지키는 원칙이나 꼭 고려해야 할 점이 있나요?
+  (예: Multi-AZ 필수, 관리형 서비스 우선, 서버리스 선호, 특정 리전 고정, Terraform 배포, 사내 보안 표준, 운영 인력 제약)" 처럼 예를 들어 묻고,
+  고객이 말한 내용을 그대로 요약해 design_principles 에 넣는다. 없다고 하면 '특별한 원칙 없음' 으로 채우고 다시 묻지 않는다.
 - 답이 모호하면 그 항목을 한 번 더 구체적으로 묻는다. 고객이 모른다고 하면 null 로 두고 넘어간다.
 - quick_replies 는 실제로 자주 나올 법한 답변으로 만든다 (예: "다운타임 불가", "새벽 30분 허용").
 - 필수 항목이 다 모이면 지금까지 파악한 내용을 3~5줄로 요약하고, 진단을 시작해도 되는지 확인하며 ready=true 로 한다.
@@ -146,9 +157,11 @@ INFRA_EXISTING_RULES = """
 - 고객사명은 의뢰를 만들 때 이미 받았으니 묻지 않는다. 첫 인사 뒤 바로 아래 질문으로 들어간다.
 - 계정 연결로 구성·사용률·비용이 <자동_수집_인프라> 에 이미 들어 있다. 현재 구성, 트래픽, 현재 비용, 가용성 현황, 변경 금지 리소스는 묻지 않는다.
 - 필수 항목({required})만 묻고, 그 밖의 항목은 고객이 먼저 말하지 않으면 묻지 않는다. 질문 수를 최소로 줄이는 것이 목표다.
-- 묻는 것은 '무엇을 가장 중요하게 보는지' 와 월 예산이다. 우선순위는 고가용성, 비용 절감, 내결함성(장애 대응), 성능, 보안 같은 가치로
+- 묻는 것은 '무엇을 가장 중요하게 보는지', 월 예산, 그리고 회사의 설계 원칙·고려사항이다. 우선순위는 고가용성, 비용 절감, 내결함성(장애 대응), 성능, 보안 같은 가치로
   쉽게 풀어 묻고 quick_replies 로 고르게 한다. priorities 에는 허용된 값만 넣는다 (고가용성·내결함성 → reliability, 비용 절감 → cost).
-- 두 항목이 채워지면 바로 요약하고 ready=true 로 한다. 자동 수집에서 알 수 있는 값은 profile 에 채운다."""
+- 세 항목이 채워지면 바로 요약하고 ready=true 로 한다. 자동 수집에서 알 수 있는 값은 profile 에 채운다.
+- 설계 원칙은 자동 수집으로 알 수 없다. 현재 구성에서 보이는 것을 근거로 구체적으로 묻는다
+  (예: 수집 정보에 Single-AZ RDS 가 있으면 "DB 이중화는 필수 원칙인가요, 비용 때문에 단일로 두고 있나요?")."""
 
 INFRA_NEW_RULES = """
 
@@ -156,7 +169,7 @@ INFRA_NEW_RULES = """
 - 고객사명은 의뢰를 만들 때 이미 받았으니 묻지 않는다 (첫 질문도 서비스 소개부터 시작한다).
 - 기존 인프라가 없으므로 현재 구성, 현재 비용, 약정, 변경 금지 리소스, 변경 허용 범위는 묻지 않는다.
 - 필수 항목({required})을 하나씩 묻는다. 무엇을 만들려는 서비스인지(워크로드), 예상 사용자·트래픽 규모, 허용 가능한 중단 정도,
-  월 예산, 개인정보 취급, 가장 중요한 가치(고가용성·비용·내결함성 등)를 묻는다.
+  월 예산, 개인정보 취급, 가장 중요한 가치(고가용성·비용·내결함성 등), 회사의 설계 원칙·고려사항을 묻는다.
 - 고객이 클라우드에 익숙하지 않을 수 있으니 용어는 짧게 풀어 쓰고, 수치를 모르면 대략적인 규모(예: 동시 접속 수십 명 / 수천 명)로 묻는다.
 - 필수 항목이 채워지면 요약하고 ready=true 로 한다."""
 
@@ -224,9 +237,11 @@ def apply_infra_defaults(p: Profile, infra_status: str | None) -> Profile:
 def to_recommend_request(p: Profile, infra_context: str = "") -> dict:
     """프로필 → /architectures (또는 /recommend) 요청 body. 제약 4종은 문장이 아니라 constraints 로 분리."""
     lines = [f"- {LABELS[k]}: {v}" for k, v in p.model_dump().items()
-             if v and k not in ("company_name", "goal", "priorities", *CONSTRAINT_FIELDS)]
+             if v and k not in ("company_name", "goal", "priorities", "design_principles", *CONSTRAINT_FIELDS)]
     infra = "\n".join(([f"[자동 수집]\n{infra_context}", ""] if infra_context else []) + ["[상담 내용]"] + lines)
-    return {"infra": infra, "goal": p.goal or "", "priorities": [c for c in p.priorities if c in CATEGORIES],
+    # 설계 원칙은 후보 설계가 지켜야 할 조건이라 목표와 함께 '원하는 방향' 으로 넘긴다
+    goal = "\n".join(x for x in (p.goal, f"설계 원칙·고려사항: {p.design_principles}" if p.design_principles else None) if x)
+    return {"infra": infra, "goal": goal, "priorities": [c for c in p.priorities if c in CATEGORIES],
             "constraints": {k: getattr(p, k) for k in CONSTRAINT_FIELDS}}
 
 

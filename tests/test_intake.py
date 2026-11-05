@@ -143,7 +143,7 @@ def test_intake_endpoint_ready_false_when_company_missing(client, llm):
 
 def test_default_required_by_infra_status():
     from intake import REQUIRED_EXISTING, REQUIRED_NEW, default_required
-    assert default_required("EXISTING", "[AWS 분석] 리전: ap-northeast-1") == REQUIRED_EXISTING == ["monthly_budget", "priorities"]
+    assert default_required("EXISTING", "[AWS 분석] 리전: ap-northeast-1") == REQUIRED_EXISTING == ["monthly_budget", "priorities", "design_principles"]
     assert default_required("EXISTING", "") == REQUIRED          # 자동 수집 정보가 없으면 줄이지 않는다
     assert default_required("NONE", "") == REQUIRED_NEW
     assert "architecture" not in REQUIRED_NEW and "cost" not in REQUIRED_NEW and "frozen_resources" not in REQUIRED_NEW
@@ -162,7 +162,7 @@ def test_system_prompt_differs_by_infra_status():
 
 def test_intake_endpoint_existing_infra_asks_only_value_fields(client, llm):
     llm.responses[Turn] = TURN.model_copy(update={"ready": True, "profile": llm_profile(
-        monthly_budget=500, priorities=["cost"])})
+        monthly_budget=500, priorities=["cost"], design_principles="Multi-AZ 필수")})
     j = client.post("/intake", json={"infra_status": "EXISTING", "infra_context": "[AWS 분석] EC2 2대",
                                      "history": [{"role": "user", "content": "비용이 제일 중요해요"}]}).json()
     assert j["missing_fields"] == [] and j["ready"] is True
@@ -172,7 +172,7 @@ def test_intake_endpoint_existing_infra_asks_only_value_fields(client, llm):
 def test_intake_endpoint_new_build_fills_defaults(client, llm):
     llm.responses[Turn] = TURN.model_copy(update={"ready": True, "profile": llm_profile(
         workload="쇼핑몰", traffic="동시 접속 100명", availability="하루 1시간 중단 가능", monthly_budget=300,
-        contains_personal_data="yes", priorities=["reliability"])})
+        contains_personal_data="yes", priorities=["reliability"], design_principles="특별한 원칙 없음")})
     j = client.post("/intake", json={"infra_status": "NONE", "history": [{"role": "user", "content": "x"}]}).json()
     assert j["missing_fields"] == [] and j["ready"] is True
     assert j["profile"]["frozen_resources"] == [] and "신규 구축" in j["profile"]["architecture"]
@@ -181,3 +181,23 @@ def test_intake_endpoint_new_build_fills_defaults(client, llm):
 
 def test_intake_endpoint_rejects_unknown_infra_status(client):
     assert client.post("/intake", json={"infra_status": "MAYBE"}).status_code == 422
+
+
+def test_design_principles_is_required_and_goes_to_goal():
+    from intake import REQUIRED, REQUIRED_EXISTING, REQUIRED_NEW, LABELS
+    assert all("design_principles" in r for r in (REQUIRED, REQUIRED_EXISTING, REQUIRED_NEW))
+    assert LABELS["design_principles"] == "설계 원칙·고려사항"
+    p = Profile(workload="쇼핑몰", goal="비용 절감", design_principles="Multi-AZ 필수, 서버리스 선호")
+    req = to_recommend_request(p)
+    assert req["goal"] == "비용 절감\n설계 원칙·고려사항: Multi-AZ 필수, 서버리스 선호"
+    assert "Multi-AZ" not in req["infra"]           # 중복해서 infra 에 넣지 않는다
+    assert to_recommend_request(Profile(goal="x"))["goal"] == "x"
+    assert llm_profile(design_principles="리전 고정").to_profile().design_principles == "리전 고정"
+    assert llm_profile().to_profile().design_principles is None
+
+
+def test_system_prompt_asks_design_principles():
+    from intake import system_prompt
+    for prompt in (system_prompt(["design_principles"]), system_prompt(["design_principles"], "EXISTING", "ctx"),
+                   system_prompt(["design_principles"], "NONE")):
+        assert "설계 원칙" in prompt and "design_principles" in prompt
