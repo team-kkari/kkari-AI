@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture Preview</title>
+<!--
+  [A 파트] Layout JSON 확인용 뷰어. 서버 없이 브라우저로 바로 연다.
+  - 붙여넣기: Layout JSON 그대로, 또는 {"layout": Layout, "cost": CostReport}
+  - 데이터를 넣은 파일 만들기:  uv run python layout.py data/samples/architecture_3tier.json --html out.html
+  그리기 순서: boxes → edges → nodes. 노드를 누르면 해당 CostItem 을 보여 준다.
+-->
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --text: #16191f; --muted: #5f6b7a; --border: #d5dbe1;
+    --cloud: #232f3e; --vpc: #248814; --az: #147eba; --pub-fill: #e9f3e6; --pub-line: #7aa116;
+    --priv-fill: #e6f2f8; --priv-line: #147eba; --asg: #ed7100; --dbsg: #3b48cc; --band: #8c97a5;
+    --edge: #545b64;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+           background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; }
+  textarea { width: 100%; height: 120px; font: 12px ui-monospace, Consolas, monospace; padding: 8px;
+             border: 1px solid var(--border); border-radius: 6px; }
+  button, label.file { padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px;
+                       background: #fff; cursor: pointer; font: inherit; }
+  button.primary { background: var(--cloud); color: #fff; border-color: var(--cloud); }
+  #input { padding: 12px 16px; }
+  #input.hidden { display: none; }
+  main { display: flex; gap: 16px; padding: 0 16px 16px; align-items: flex-start; }
+  #canvas { flex: 1; overflow: auto; background: #fff; border: 1px solid var(--border); border-radius: 8px; }
+  aside { width: 320px; flex-shrink: 0; background: var(--panel); border: 1px solid var(--border);
+          border-radius: 8px; padding: 12px; position: sticky; top: 16px; }
+  aside h2 { font-size: 14px; margin: 0 0 8px; }
+  aside .total { font-size: 22px; font-weight: 700; }
+  aside .muted, .muted { color: var(--muted); font-size: 12px; }
+  aside .formula { font: 12px ui-monospace, Consolas, monospace; background: var(--bg); padding: 8px;
+                   border-radius: 6px; word-break: break-word; }
+  .warn { color: #b0451a; font-size: 12px; }
+  svg text { font-family: system-ui, "Segoe UI", "Malgun Gothic", sans-serif; }
+  .node { cursor: pointer; }
+  .node.sel rect.icon { stroke: #ff9900; stroke-width: 3; }
+  @media (max-width: 800px) { main { flex-direction: column; } aside { width: 100%; position: static; } }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Architecture Preview</h1>
+  <button id="toggle">JSON 입력 열기/닫기</button>
+  <label class="file">파일 열기 <input type="file" id="file" accept=".json" hidden></label>
+  <span class="muted" id="status"></span>
+</header>
+<div id="input">
+  <textarea id="json" placeholder='Layout JSON 또는 {"layout": ..., "cost": ...} 를 붙여 넣으세요'></textarea>
+  <p><button class="primary" id="render">그리기</button></p>
+</div>
+<main>
+  <div id="canvas"></div>
+  <aside id="side"><p class="muted">노드를 누르면 비용 항목이 보입니다.</p></aside>
+</main>
+<script>
+const PRELOAD = null;
+
+const NS = "http://www.w3.org/2000/svg";
+const ICON_STYLE = {   // 색 사각형 + 약어 (실제 아이콘은 프론트 팀)
+  users: ["#232f3e", "USR"], internet: ["#232f3e", "NET"],
+  route53: ["#8c4fff", "R53"], cloudfront: ["#8c4fff", "CF"], waf: ["#dd344c", "WAF"], shield: ["#dd344c", "SHD"],
+  acm: ["#dd344c", "ACM"], api_gateway: ["#e7157b", "APIG"],
+  igw: ["#8c4fff", "IGW"], nat_gateway: ["#8c4fff", "NAT"], alb: ["#8c4fff", "ALB"], nlb: ["#8c4fff", "NLB"],
+  vpc_endpoint: ["#8c4fff", "VPCE"],
+  ec2: ["#ed7100", "EC2"], auto_scaling: ["#ed7100", "ASG"], lambda: ["#ed7100", "λ"], ecs: ["#ed7100", "ECS"],
+  fargate: ["#ed7100", "FGT"], eks: ["#ed7100", "EKS"], ecr: ["#ed7100", "ECR"],
+  rds: ["#3b48cc", "RDS"], aurora: ["#3b48cc", "AUR"], dynamodb: ["#3b48cc", "DDB"], elasticache: ["#3b48cc", "EC"],
+  s3: ["#7aa116", "S3"], efs: ["#7aa116", "EFS"], ebs: ["#7aa116", "EBS"],
+  sqs: ["#e7157b", "SQS"], sns: ["#e7157b", "SNS"], eventbridge: ["#e7157b", "EVB"], step_functions: ["#e7157b", "SFN"],
+  cloudwatch: ["#e7157b", "CW"], secrets_manager: ["#dd344c", "SM"], kms: ["#dd344c", "KMS"], iam: ["#dd344c", "IAM"],
+  cognito: ["#dd344c", "COG"], backup: ["#7aa116", "BAK"],
+};
+const BOX_STYLE = {
+  cloud:       { stroke: "var(--cloud)", fill: "none", dash: "", width: 2 },
+  edge_band:   { stroke: "var(--band)", fill: "#fafbfc", dash: "6 4", width: 1 },
+  region_band: { stroke: "var(--band)", fill: "#fafbfc", dash: "6 4", width: 1 },
+  vpc:         { stroke: "var(--vpc)", fill: "none", dash: "", width: 2 },
+  az:          { stroke: "var(--az)", fill: "none", dash: "8 5", width: 1.5 },
+  "subnet:public":  { stroke: "var(--pub-line)", fill: "var(--pub-fill)", dash: "", width: 1 },
+  "subnet:private": { stroke: "var(--priv-line)", fill: "var(--priv-fill)", dash: "", width: 1 },
+  "group:auto_scaling":    { stroke: "var(--asg)", fill: "none", dash: "6 4", width: 1.5 },
+  "group:db_subnet_group": { stroke: "var(--dbsg)", fill: "none", dash: "6 4", width: 1.5 },
+  group:       { stroke: "#7d8998", fill: "none", dash: "6 4", width: 1.5 },
+};
+
+let data = null, selected = null;
+
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function text(parent, x, y, s, attrs = {}) {
+  const t = el("text", { x, y, ...attrs }, parent);
+  t.textContent = s;
+  return t;
+}
+function clip(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+const money = v => v == null ? "추정 불가" : "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function render(d) {
+  const L = d.layout || d;
+  data = { layout: L, cost: d.cost || null, name: d.name || "" };
+  if (data.name) document.getElementById("title").textContent = data.name;
+  const svg = el("svg", { width: L.width, height: L.height, viewBox: `0 0 ${L.width} ${L.height}` });
+  el("rect", { width: L.width, height: L.height, fill: "#fff" }, svg);
+  const defs = el("defs", {}, svg);
+  const m = el("marker", { id: "arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7,
+                           orient: "auto-start-reverse" }, defs);
+  el("path", { d: "M0,0 L10,5 L0,10 z", fill: "var(--edge)" }, m);
+
+  // 1) boxes
+  for (const b of L.boxes) {
+    const st = BOX_STYLE[`${b.kind}:${b.style}`] || BOX_STYLE[b.kind] || BOX_STYLE.group;
+    el("rect", { x: b.x, y: b.y, width: b.w, height: b.h, rx: b.kind === "subnet" ? 4 : 2,
+                 fill: st.fill, stroke: st.stroke, "stroke-width": st.width, "stroke-dasharray": st.dash }, svg);
+    const bold = ["cloud", "vpc", "az"].includes(b.kind);
+    text(svg, b.x + 8, b.y + (b.kind === "group" ? 14 : 18), b.label,
+         { "font-size": bold ? 13 : 11, "font-weight": bold ? 700 : 500, fill: st.stroke });
+  }
+
+  // 2) edges (아이콘 테두리에서 끊음)
+  const byId = Object.fromEntries(L.nodes.map(n => [n.id, n]));
+  const eg = el("g", {}, svg);
+  for (const e of L.edges) {
+    const a = byId[e.source], b = byId[e.target];
+    if (!a || !b) continue;
+    const [ax, ay] = [a.x + a.w / 2, a.y + a.h / 2], [bx, by] = [b.x + b.w / 2, b.y + b.h / 2];
+    const cut = (n, dx, dy) => {
+      const s = Math.min(Math.abs(dx) > 1e-6 ? (n.w / 2 + 4) / Math.abs(dx) : Infinity,
+                         Math.abs(dy) > 1e-6 ? (n.h / 2 + 4) / Math.abs(dy) : Infinity);
+      return [dx * s, dy * s];
+    };
+    const dx = bx - ax, dy = by - ay;
+    const [sx, sy] = cut(a, dx, dy), [tx, ty] = cut(b, -dx, -dy);
+    el("line", { x1: ax + sx, y1: ay + sy, x2: bx + tx, y2: by + ty, stroke: "var(--edge)", "stroke-width": 1.3,
+                 "marker-end": "url(#arrow)", opacity: 0.8 }, eg);
+    if (e.label) {
+      const mx = (ax + bx) / 2, my = (ay + by) / 2;
+      const t = text(eg, mx, my - 4, e.label, { "font-size": 10, "text-anchor": "middle", fill: "var(--edge)",
+                                                "paint-order": "stroke", stroke: "#fff", "stroke-width": 3 });
+    }
+  }
+
+  // 3) nodes
+  for (const n of L.nodes) {
+    const [color, abbr] = ICON_STYLE[n.icon] || ["#7d8998", n.icon.slice(0, 3).toUpperCase()];
+    const g = el("g", { class: "node", "data-id": n.id }, svg);
+    el("rect", { class: "icon", x: n.x, y: n.y, width: n.w, height: n.h, rx: 8, fill: color }, g);
+    text(g, n.x + n.w / 2, n.y + n.h / 2 + 5, abbr, { "font-size": 15, "font-weight": 700, fill: "#fff",
+                                                       "text-anchor": "middle" });
+    const cx = n.x + n.w / 2;
+    text(g, cx, n.y + n.h + 16, clip(n.label, 26), { "font-size": 12, "font-weight": 700, "text-anchor": "middle" });
+    if (n.role) text(g, cx, n.y + n.h + 31, clip(n.role, 30), { "font-size": 11, fill: "var(--muted)", "text-anchor": "middle" });
+    const t = el("title", {}, g); t.textContent = `${n.id}\n${n.label}\n${n.role}`;
+    g.addEventListener("click", () => select(n));
+  }
+
+  const c = document.getElementById("canvas");
+  c.replaceChildren(svg);
+  document.getElementById("status").textContent =
+    `${L.nodes.length} nodes · ${L.edges.length} edges · ${L.boxes.length} boxes`;
+  showSummary();
+}
+
+function showSummary() {
+  const side = document.getElementById("side");
+  const L = data.layout, C = data.cost;
+  let h = "";
+  if (C) {
+    h += `<h2>월 예상 비용</h2><div class="total">${money(C.monthly_total_usd)}</div>`;
+    if (C.unpriced.length) h += `<p class="warn">추정 불가: ${C.unpriced.map(esc).join(", ")}</p>`;
+    h += `<p class="muted">${C.assumptions.map(esc).join("<br>")}</p>`;
+  }
+  if (L.warnings && L.warnings.length) h += `<h2>warnings</h2>` + L.warnings.map(w => `<p class="warn">${esc(w)}</p>`).join("");
+  h += `<p class="muted">노드를 누르면 비용 항목이 보입니다.</p>`;
+  side.innerHTML = h;
+}
+
+function select(n) {
+  document.querySelectorAll(".node.sel").forEach(e => e.classList.remove("sel"));
+  if (selected === n.id) { selected = null; showSummary(); return; }
+  selected = n.id;
+  document.querySelector(`.node[data-id="${CSS.escape(n.id)}"]`)?.classList.add("sel");
+  const side = document.getElementById("side");
+  const item = data.cost?.items.find(i => i.node_id === n.node_id);
+  let h = `<h2>${esc(n.label)}</h2><p class="muted">${esc(n.role)}<br>id: ${esc(n.id)}${n.id !== n.node_id ? ` (node ${esc(n.node_id)})` : ""}</p>`;
+  if (!data.cost) h += `<p class="muted">비용 데이터 없음 (cost 를 함께 붙여 넣으세요)</p>`;
+  else if (!item) h += `<p class="muted">비용 항목 없음</p>`;
+  else {
+    h += `<div class="total">${money(item.monthly_usd)}<span class="muted"> / 월 (${esc(item.kind)})</span></div>`;
+    if (n.id !== n.node_id) h += `<p class="muted">AZ 마다 그린 복제본 — 금액은 전체 합계</p>`;
+    h += `<p class="formula">${esc(item.formula)}</p>`;
+  }
+  h += `<p><button onclick="selected=null;document.querySelectorAll('.node.sel').forEach(e=>e.classList.remove('sel'));showSummary()">전체 요약</button></p>`;
+  side.innerHTML = h;
+}
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+function load(textValue) {
+  try { render(JSON.parse(textValue)); }
+  catch (e) { document.getElementById("status").textContent = "JSON 오류: " + e.message; }
+}
+
+document.getElementById("render").onclick = () => load(document.getElementById("json").value);
+document.getElementById("toggle").onclick = () => document.getElementById("input").classList.toggle("hidden");
+document.getElementById("file").onchange = async ev => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  const t = await f.text();
+  document.getElementById("json").value = t;
+  load(t);
+};
+if (PRELOAD) {
+  document.getElementById("json").value = JSON.stringify(PRELOAD, null, 1);
+  document.getElementById("input").classList.add("hidden");
+  render(PRELOAD);
+}
+</script>
+</body>
+</html>
