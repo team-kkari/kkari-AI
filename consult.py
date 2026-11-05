@@ -23,7 +23,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from intake import decide_ready
-from textfmt import KRW_PER_USD, OUTPUT_RULES, plain, plain_tree
+from textfmt import CHAT_OUTPUT_RULES, KRW_PER_USD, OUTPUT_RULES, plain, plain_tree, rich
 
 LOGS = Path(__file__).parent / "data" / "consult_logs"
 WARMUP = "__warmup__"
@@ -227,7 +227,7 @@ def to_recommend_request(p: ConsultProfileLLM, analysis: dict | None = None) -> 
 
 
 class ConsultTurn(BaseModel):
-    reply: str = Field(description="고객에게 보낼 메시지. 직전 답을 쉬운 말로 확인하고 질문 하나. 마크다운 금지, 일반 텍스트")
+    reply: str = Field(description="고객에게 보낼 메시지. 직전 답을 쉬운 말로 확인하고 질문 하나. 마크다운은 **굵게** 만 허용")
     question_id: QuestionId = Field(description="이번 메시지에서 묻는 질문 ID. 요약·확인만 하면 none")
     quick_replies: list[str] = Field(description="눌러서 답할 수 있는 짧은 답 2~6개 (선택형 질문이면 보기 그대로)")
     profile: ConsultProfileLLM = Field(description="대화 전체와 업로드 파일 분석으로 채운 프로필 (매 턴 처음부터 다시 채운다)")
@@ -279,7 +279,7 @@ SYSTEM = f"""너는 클라우드 비용·구조 검토 서비스의 '고객창�
 - 매 턴 대화 전체와 파일 분석을 다시 읽어 처음부터 채운다 (이전 턴 값은 저장되지 않는다).
 - 안 물어본 항목은 not_asked / 빈 문자열 / -1. 고객이 모른다고 한 Q6·Q7 은 unknown.
 - 모든 메시지는 한국어.
-- 예산(Q4)을 원화로 들으면 달러로 환산해 "월 약 $3,570 으로 정리할게요" 처럼 확인한다.""" + OUTPUT_RULES
+- 예산(Q4)을 원화로 들으면 달러로 환산해 "월 약 $3,570 으로 정리할게요" 처럼 확인한다.""" + CHAT_OUTPUT_RULES
 
 
 class Consult:
@@ -298,7 +298,7 @@ class Consult:
         req = missing(p, "required")
         ready = decide_ready(out.ready, req, history)
         result = {
-            "reply": plain(out.reply),
+            "reply": rich(out.reply),
             "question": question_meta(out.question_id, p),
             "quick_replies": [plain(q) for q in out.quick_replies],
             "profile": p.to_public(),

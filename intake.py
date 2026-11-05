@@ -24,7 +24,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from retriever import CATEGORIES
-from textfmt import OUTPUT_RULES, plain
+from textfmt import CHAT_OUTPUT_RULES, plain, rich
 
 LOGS = Path(__file__).parent / "data" / "intake_logs"
 WARMUP = "__warmup__"  # 서버 시작 시 미리 한 번 호출 (로그 제외)
@@ -64,6 +64,11 @@ LABELS = {
     "priorities": "우선순위", "change_tolerance": "변경 허용 범위", "constraints": "제약", "operations": "운영 체계",
     "security": "보안 요구",
 }
+# 인프라 상태별 기본 필수 항목. 고객사명은 의뢰를 만들 때 이미 받았으므로 묻지 않는다.
+#  EXISTING: 계정 연결로 구성·트래픽·비용을 자동 수집했으므로 가치(우선순위)와 예산만 묻는다.
+#  NONE: 기존 인프라가 없으므로 현재 구성·비용·변경 금지 리소스 대신 만들 서비스를 묻는다.
+REQUIRED_EXISTING = ["monthly_budget", "priorities"]
+REQUIRED_NEW = ["workload", "traffic", "availability", "monthly_budget", "contains_personal_data", "priorities"]
 FIELDS = list(Profile.model_fields)  # required_fields 로 지정 가능한 키
 CONSTRAINT_FIELDS = ["monthly_budget", "currency", "contains_personal_data", "frozen_resources"]
 
@@ -102,7 +107,7 @@ class ProfileLLM(BaseModel):
 
 
 class Turn(BaseModel):
-    reply: str = Field(description="고객에게 보낼 메시지: 직전 답변을 짧게 확인하고 다음 질문 1~2개. 마크다운 금지, 일반 텍스트")
+    reply: str = Field(description="고객에게 보낼 메시지: 직전 답변을 짧게 확인하고 다음 질문 1~2개. 마크다운은 **굵게** 만 허용")
     quick_replies: list[str] = Field(description="고객이 눌러서 답할 수 있는 짧은 답변 후보 2~4개 (질문이 없으면 빈 목록)")
     profile: ProfileLLM = Field(description="지금까지 대화와 자동 수집 정보로 채운 요구사항 프로필")
     ready: bool = Field(description="필수 항목이 모두 채워졌거나 고객이 바로 진단을 원하면 true")
@@ -135,8 +140,42 @@ SYSTEM_TMPL = """너는 클라우드 인프라 관리 서비스의 초기 상담
 profile.priorities 에는 다음 값만 쓴다: {categories}"""
 
 
-def system_prompt(required: list[str]) -> str:
-    return SYSTEM_TMPL.format(required=", ".join(LABELS.get(k, k) for k in required), categories=CATEGORIES) + OUTPUT_RULES
+INFRA_EXISTING_RULES = """
+
+[이 고객은 이미 AWS 인프라가 있다]
+- 계정 연결로 구성·사용률·비용이 <자동_수집_인프라> 에 이미 들어 있다. 현재 구성, 트래픽, 현재 비용, 가용성 현황, 변경 금지 리소스는 묻지 않는다.
+- 필수 항목({required})만 묻고, 그 밖의 항목은 고객이 먼저 말하지 않으면 묻지 않는다. 질문 수를 최소로 줄이는 것이 목표다.
+- 묻는 것은 '무엇을 가장 중요하게 보는지' 와 월 예산이다. 우선순위는 고가용성, 비용 절감, 내결함성(장애 대응), 성능, 보안 같은 가치로
+  쉽게 풀어 묻고 quick_replies 로 고르게 한다. priorities 에는 허용된 값만 넣는다 (고가용성·내결함성 → reliability, 비용 절감 → cost).
+- 두 항목이 채워지면 바로 요약하고 ready=true 로 한다. 자동 수집에서 알 수 있는 값은 profile 에 채운다."""
+
+INFRA_NEW_RULES = """
+
+[이 고객은 아직 AWS 인프라가 없다 (신규 구축)]
+- 기존 인프라가 없으므로 현재 구성, 현재 비용, 약정, 변경 금지 리소스, 변경 허용 범위는 묻지 않는다.
+- 필수 항목({required})을 하나씩 묻는다. 무엇을 만들려는 서비스인지(워크로드), 예상 사용자·트래픽 규모, 허용 가능한 중단 정도,
+  월 예산, 개인정보 취급, 가장 중요한 가치(고가용성·비용·내결함성 등)를 묻는다.
+- 고객이 클라우드에 익숙하지 않을 수 있으니 용어는 짧게 풀어 쓰고, 수치를 모르면 대략적인 규모(예: 동시 접속 수십 명 / 수천 명)로 묻는다.
+- 필수 항목이 채워지면 요약하고 ready=true 로 한다."""
+
+
+def default_required(infra_status: str | None, infra_context: str = "") -> list[str]:
+    """infra_status 에 맞는 기본 필수 항목. EXISTING 은 자동 수집된 정보가 있을 때만 줄인다."""
+    if infra_status == "NONE":
+        return REQUIRED_NEW
+    if infra_status == "EXISTING" and infra_context.strip():
+        return REQUIRED_EXISTING
+    return REQUIRED
+
+
+def system_prompt(required: list[str], infra_status: str | None = None, infra_context: str = "") -> str:
+    prompt = SYSTEM_TMPL.format(required=", ".join(LABELS.get(k, k) for k in required), categories=CATEGORIES)
+    extra = ""
+    if infra_status == "NONE":
+        extra = INFRA_NEW_RULES
+    elif infra_status == "EXISTING" and infra_context.strip():
+        extra = INFRA_EXISTING_RULES
+    return prompt + extra.replace("{required}", ", ".join(LABELS.get(k, k) for k in required)) + CHAT_OUTPUT_RULES
 
 
 def is_filled(p: Profile, key: str) -> bool:
@@ -170,6 +209,16 @@ def missing(p: Profile, required: list[str] | None = None) -> list[str]:
     return [k for k in (REQUIRED if required is None else required) if not is_filled(p, k)]
 
 
+def apply_infra_defaults(p: Profile, infra_status: str | None) -> Profile:
+    """신규 구축은 묻지 않은 항목(현재 구성·변경 금지 리소스)을 '없음'으로 채워 추천 요청이 비지 않게 한다."""
+    if infra_status != "NONE":
+        return p
+    return p.model_copy(update={
+        "architecture": p.architecture or "신규 구축 (기존 AWS 인프라 없음)",
+        "frozen_resources": [] if p.frozen_resources is None else p.frozen_resources,
+    })
+
+
 def to_recommend_request(p: Profile, infra_context: str = "") -> dict:
     """프로필 → /architectures (또는 /recommend) 요청 body. 제약 4종은 문장이 아니라 constraints 로 분리."""
     lines = [f"- {LABELS[k]}: {v}" for k, v in p.model_dump().items()
@@ -184,19 +233,19 @@ class Intake:
         self.llm = llm
 
     def turn(self, history: list[dict], infra_context: str = "", session_id: str | None = None,
-             required: list[str] | None = None) -> dict:
-        required = REQUIRED if required is None else required
+             required: list[str] | None = None, infra_status: str | None = None) -> dict:
+        required = default_required(infra_status, infra_context) if required is None else required
         convo = "\n".join(f"{'상담원' if m['role'] == 'assistant' else '고객'}: {m['content']}" for m in history)
         user = (f"<자동_수집_인프라>\n{infra_context or '(없음)'}\n</자동_수집_인프라>\n\n"
                 f"<대화>\n{convo or '(아직 없음 — 첫 턴)'}\n</대화>\n\n"
                 f"<필수_항목>{', '.join(required)}</필수_항목>\n\n"
                 "다음 상담원 응답을 만들어라.")
         t0 = time.time()
-        out: Turn = self.llm.structured(system_prompt(required), user, Turn, effort="low")
-        p = out.profile.to_profile()
+        out: Turn = self.llm.structured(system_prompt(required, infra_status, infra_context), user, Turn, effort="low")
+        p = apply_infra_defaults(out.profile.to_profile(), infra_status)
         ready = decide_ready(out.ready, missing(p, required), history)
         result = {
-            "reply": plain(out.reply),
+            "reply": rich(out.reply),
             "quick_replies": [plain(q) for q in out.quick_replies],
             "profile": p.model_dump(),
             "missing": [LABELS.get(k, k) for k in missing(p, required)],
