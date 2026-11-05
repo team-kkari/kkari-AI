@@ -1,0 +1,9 @@
+.git
+.venv
+__pycache__
+tests
+models
+data/raw
+data/intake_logs
+data/consult_logs
+.env
