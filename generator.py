@@ -92,7 +92,7 @@ class LLM(Protocol):
 
     def stream_text(self, system: str, messages: list[dict]) -> Iterator[str]: ...
     def structured(self, system: str, user: str, schema: type[BaseModel],
-                   effort: str = "high") -> BaseModel: ...
+                   effort: str = "high", attachments: list[dict] | None = None) -> BaseModel: ...
 
 
 class ClaudeLLM:
@@ -116,11 +116,12 @@ class ClaudeLLM:
         if final.stop_reason == "refusal":
             raise LLMRefusal()
 
-    def structured(self, system, user, schema, effort="high"):
+    def structured(self, system, user, schema, effort="high", attachments=None):
         """effort: 솔루션 생성은 high, 상담 질문처럼 빨라야 하는 건 low."""
         resp = self.client.beta.messages.parse(
             model=self.MODEL, max_tokens=16000, system=system,
-            messages=[{"role": "user", "content": user}],
+            # attachments: Claude content 블록 (이미지·PDF 등) — 텍스트 질문 앞에 붙인다
+            messages=[{"role": "user", "content": [*attachments, {"type": "text", "text": user}] if attachments else user}],
             output_format=schema, output_config={"effort": effort}, **self.FALLBACK,
         )
         if resp.stop_reason == "refusal":

@@ -105,6 +105,48 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 { "query": "EC2 CPU 사용률이 낮은데 비용 줄이는 법", "k": 5, "categories": ["cost"] }
 ```
 
+### 고객창구 (비전공자용 상담) — `POST /consult/files`, `POST /consult`
+
+`/intake` 가 인프라 전문가용이라면 고객창구는 **클라우드를 잘 모르는 고객용**. 쉬운 말로 한 번에 질문 하나씩, 팀 질문지(Q1~Q15) 기준.
+운영 중인 인프라 파일을 올리면 파일로 알 수 있는 질문은 건너뛴다 (안 올리면 질문이 늘어남). 서버는 상태가 없다.
+
+```
+(선택) POST /consult/files   multipart files[]  → { "file_analysis": {...} }   백엔드가 보관
+       POST /consult         { history, file_analysis, session_id } 반복 → ready=true
+       → recommend_request 를 그대로 POST /architectures
+```
+
+**`POST /consult/files`** — `multipart/form-data`, 필드 이름 `files` (여러 개)
+- 지원: `.tf .tfvars .json .yaml .yml .csv .txt .md` 등 텍스트, `.png .jpg .webp` 구성도 이미지, `.pdf`. 파일당 5MB, 최대 10개
+- 엑셀은 CSV 로 저장해서 올리도록 안내. 지원하지 않는 파일만 있으면 400
+- **비밀값(AWS 키·비밀번호·토큰·비공개 키)은 Claude 에 보내기 전에 지운다** (`redacted_secrets` 개수)
+- 응답 `file_analysis`: `summary`(고객용 쉬운 요약), `technical_summary`, `architecture_type`, `region`, `resources[]`,
+  `monthly_cost_usd`, `concerns[]`(눈에 띄는 위험·낭비), `answered_questions[]`, `files[]`(파일별 사용 여부·사유·메모)
+
+**`POST /consult`** 응답
+
+```jsonc
+{
+  "reply": "올려 주신 파일을 보니 ... 어떤 고민이 있어서 검토를 신청하셨나요?",
+  "question": { "id": "Q2", "step": 1, "label": "...", "priority": "required",
+                "input": "multi", "options": [{ "value": "cost", "label": "요금 절감" }, ...] },  // 프론트 입력 UI 용
+  "quick_replies": ["요금이 너무 많이 나와요", ...],
+  "profile": { "concern": ..., "desired_outcomes": [...], "priority_order": [...], "budget_stance": ..., "monthly_budget": ...,
+               "currency": ..., "service_description": ..., "architecture_type": ..., "daily_users": ..., "traffic_pattern": ...,
+               "outage_impact": ..., "recovery_target": ..., "contains_personal_data": ..., "sensitive_data": ..., "compliance": ...,
+               "frozen_resources": ..., "change_tolerance": ..., "operator": ..., "aws_connection": ... },  // null = 아직 모름
+  "missing": ["Q4", "Q9"],               // 남은 필수(+조건부) 질문 ID
+  "missing_labels": ["...", "..."],
+  "recommended_missing": ["Q7"],          // 남은 권장 질문
+  "ready": false,
+  "recommend_request": null               // ready=true 면 {infra, goal, priorities, constraints, current_monthly_usd} → /architectures
+}
+```
+
+- `question.input`: `text` | `single` | `multi` | `rank`(Q3, Q2 에서 고른 것만 options) | `budget` | `yes_no`
+- 필수: Q1·Q2·Q3(2개 이상 골랐을 때)·Q4·Q5·Q9·Q9-1(멈추면 큰 손해일 때)·Q10·Q15 / 권장: Q6·Q7·Q8·Q12·Q13 / 선택: Q11·Q14
+- 대화·결과는 `data/consult_logs/날짜.jsonl` 에 쌓인다 (git 미포함)
+
 ### `POST /intake` — 초기 상담 인터뷰 챗봇 (챗봇이 질문)
 
 고객(인프라 전문가)에게 챗봇이 1~2개씩 질문하며 요구사항을 모은다. 서버는 상태를 저장하지 않으므로 **매 턴 대화 기록 전체를 보낸다.**
