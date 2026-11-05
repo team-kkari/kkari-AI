@@ -14,7 +14,7 @@ kkari-AI RAG 서버를 Windows 노트북에서 실행하는 방법.
 | Git | <https://git-scm.com/download/win> |
 | uv | Python 설치·가상환경·패키지 관리를 한 번에 해준다 (Python 따로 설치 불필요) |
 | 디스크 여유 | 약 4GB (임베딩 모델 470MB + PyTorch 등) |
-| Claude API 키 | `/recommend`, `/chat` 에 필요. `/search` 는 키 없이 동작 |
+| Claude API 키 | `/intake`, `/architectures`, `/recommend`, `/chat` 에 필요. `/search` 는 키 없이 동작 |
 | GPU | **필요 없음.** 인덱스는 미리 만들어져 있고, 질문 한 줄 임베딩은 CPU 로 충분 |
 
 ---
@@ -88,9 +88,11 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
 - `Application startup complete` 가 뜨면 준비 완료 (모델·인덱스 로딩에 약 1분)
-- API 키 없이 `/recommend`, `/chat` 을 부르면 503 과 함께 설정 방법이 응답으로 온다
+- API 키 없이 AI 기능을 부르면 500 `{"code": "NOT_CONFIGURED"}` 가 온다 (서버 로그에 원인 출력)
 - 브라우저에서 <http://localhost:8000/docs> → Swagger 에서 바로 테스트 가능
-- 처음 실행 시 **Windows 방화벽 허용 창**이 뜨면 "개인 네트워크" 허용 → 같은 와이파이의 팀원이 `http://<노트북IP>:8000` 으로 호출 가능
+- 처음 실행 시 **Windows 방화벽 허용 창**이 뜨면 "개인 네트워크" 허용 → 같은 와이파이의 백엔드 서버가 `http://<노트북IP>:8000` 으로 호출 가능
+- **CORS 는 기본으로 꺼져 있다** (브라우저에서 직접 호출 불가, 백엔드만 호출). 꼭 필요하면 `setx ALLOWED_ORIGINS "http://백엔드주소"`
+- 에러 응답은 모두 `{"code", "message", "retryable"}` — `retryable: true` 일 때만 재시도
   - 노트북 IP 확인: `ipconfig` → "IPv4 주소"
 
 ---
@@ -127,11 +129,14 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
   "profile": { "workload": "...", "traffic": null, "priorities": ["cost"], ... },  // 모은 정보
   "missing": ["가용성 목표", "변경 허용 범위"],   // 아직 못 모은 필수 항목
   "ready": false,
-  "recommend_request": null   // ready=true 가 되면 {infra, goal, priorities} → 그대로 /recommend 에 POST
+  "recommend_request": null   // ready=true 가 되면 {infra, goal, priorities, constraints} → 그대로 /architectures 에 POST
 }
 ```
 
-- 흐름: `/intake` 반복 → `ready: true` → `recommend_request` 를 `/recommend` 로 보내 솔루션 생성
+- 흐름: `/intake` 반복 → `ready: true` → `recommend_request` 를 `/architectures` 로 보내 추천 생성
+- profile 의 제약 필드 (타입 고정): `monthly_budget`(number, 0=예산 없음), `currency`(`USD`|`KRW`), `contains_personal_data`(bool),
+  `frozen_resources`(string[], `[]`=없음). null 은 아직 모름
+- 요청에 `required_fields: ["workload", "monthly_budget", ...]` 를 주면 필수 질문 목록을 바꿀 수 있다. 응답 `missing_fields` 는 영문 키
 - `infra_context` 로 넘긴 정보는 다시 묻지 않고, 그걸 근거로 더 깊게 묻는다
 - 한 턴 약 4~10초. 서버 시작 직후 첫 호출이 느린 것을 막으려고 시작 시 백그라운드 워밍업을 1회 한다
 - 대화·프로필은 `data/intake_logs/날짜.jsonl` 에 쌓인다 (git 미포함, 추후 분석/학습용)
@@ -170,7 +175,10 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 
 ### `POST /architectures` — 추천 아키텍처 5개 (순위·장단점·비용·설계도)
 
-요청은 `/recommend` 와 같다 (`/intake` 의 `recommend_request` 를 그대로 보내도 됨) + 선택 `count`(1~5, 기본 5).
+요청은 `/intake` 의 `recommend_request` 를 그대로 보내면 된다. 선택 입력:
+`count`(1~5, 기본 5), `constraints`(예산·개인정보·변경 금지 리소스, `krw_per_usd` 환율 기본 1400),
+`current_monthly_usd`(백엔드가 분석한 현재 월 비용 — 주면 현재 대비 증감의 기준, 응답 `current.source = "input"`).
+안마다 `violations[]` (`{constraint, checked_by: code|ai, detail}`) 가 붙고, 위반 안은 순위가 뒤로 간다.
 
 ```json
 { "infra": "EC2 m5.2xlarge 10대 ...", "goal": "비용 절감", "priorities": ["cost", "reliability"], "count": 5 }
@@ -181,7 +189,10 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 ```jsonc
 {
   "overall": "5개 안 비교 총평 …",
-  "current": { "cost": { "monthly_total_usd": 4180.5, "items": [...] }, "nodes": [...] },  // 현재 인프라 계산
+  "current": { "monthly_usd": 4200, "source": "input",      // input = 요청값, estimated = AI 가 구성으로 추정
+               "estimated_cost": null, "nodes": [] },        // source=estimated 일 때만 채워짐
+  "pricing": { "region": "ap-northeast-2", "built": "2026-11-05", "currency": "USD", "basis": "온디맨드 …" },
+  "warnings": [],            // 서울 외 리전 언급 시 경고
   "architectures": [
     {
       "rank": 1, "rank_reason": "…", "best_for": "…",
@@ -193,7 +204,9 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
       "cost": { "monthly_total_usd": 2610.2, "items": [{ "node_id": "web", "monthly_usd": 292.9, "formula": "…" }],
                 "unpriced": [], "assumptions": ["서울 리전 온디맨드 기준", …] },
       "vs_current": { "usd": -1570.3, "pct": -37.6 },
-      "sources": [1, 4], "bp_ids": ["COST06-BP03"]
+      "sources": [1, 4], "bp_ids": ["COST06-BP03"],
+      "constraint_checks": [{ "constraint": "frozen_resources", "satisfied": true, "detail": "…" }],
+      "violations": []       // [{ "constraint": "monthly_budget", "checked_by": "code", "detail": "…" }]
     }
   ],
   "sources": [ { "n": 1, "title": "…", "url": "…" } ],
@@ -208,14 +221,23 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 - 비용은 `data/pricing/ap-northeast-2.json`(AWS 공식 Price List) 로 코드가 계산한다 — AI 가 가격을 쓰지 않는다. 가격표 갱신: `uv run python build_pricing.py`
 - 1~3분 걸린다 (아키텍처 5개를 병렬 생성 후 순위 비교). 프론트에 로딩 화면 필요
 
-### `POST /chat` — 챗봇 (스트리밍 텍스트)
+### `POST /chat` — 챗봇 (NDJSON 스트리밍)
 
 ```json
 { "question": "NAT Gateway 비용 줄이는 방법?", "history": [], "categories": null }
 ```
 
-- 응답 본문: 답변 텍스트가 스트리밍으로 옴 (본문 속 `[1]`, `[2]` 는 출처 번호)
-- 응답 헤더 `X-Sources`: 출처 목록 JSON (URL 인코딩됨 → `JSON.parse(decodeURIComponent(h))`)
+응답 `application/x-ndjson` — 한 줄에 JSON 하나:
+
+```
+{"type":"sources","sources":[{"n":1,"title":"...","url":"..."}]}
+{"type":"delta","text":"NAT Gateway 비용은 "}
+{"type":"delta","text":"... [1]"}
+{"type":"done","refused":false}
+```
+
+- 본문 속 `[1]` 은 sources 의 `n`. `refused: true` 면 모델이 정책상 답변을 거절한 것
+- 스트림 도중 오류는 마지막 줄 `{"type":"error","code":...,"retryable":...}`. 시작 전 오류는 일반 에러 응답(HTTP 4xx/5xx)
 - 다음 질문 때 `history` 에 `[{"role":"user","content":"..."},{"role":"assistant","content":"..."}]` 로 이전 대화를 넣는다
 
 `categories` 가능 값: `cost, performance, reliability, security, operations, sustainability, serverless, compute, database, container, network`

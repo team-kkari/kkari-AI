@@ -66,10 +66,43 @@ FIELDS = list(Profile.model_fields)  # required_fields 로 지정 가능한 키
 CONSTRAINT_FIELDS = ["monthly_budget", "currency", "contains_personal_data", "frozen_resources"]
 
 
+class ProfileLLM(BaseModel):
+    """Claude 구조화 출력용 프로필. nullable 필드가 많으면 API 가 'Schema is too complex' 로 거부해서
+    null 대신 "" / -1 / "unknown" 을 쓰게 하고, 코드에서 Profile(null 사용)로 바꾼다."""
+    workload: str = Field(description="서비스/워크로드 설명 (무엇을 하는 시스템인지, 사용자 규모). 모르면 빈 문자열")
+    architecture: str = Field(description="현재 구성: 주요 AWS 서비스·인스턴스 타입·대수·리전. 모르면 빈 문자열")
+    traffic: str = Field(description="트래픽 패턴: 평균/피크, 시간대·계절성, 증가 추세. 모르면 빈 문자열")
+    availability: str = Field(description="가용성 목표: SLA, RTO/RPO, 허용 장애 범위. 모르면 빈 문자열")
+    performance: str = Field(description="성능 요구: 응답 지연, 처리량 목표. 모르면 빈 문자열")
+    cost: str = Field(description="현재 월 비용과 비용 구성, 약정(RI·SP) 보유 여부. 모르면 빈 문자열")
+    monthly_budget: float = Field(description="월 예산 금액(숫자, 원화면 원 단위). 예산이 없다고 답하면 0, 아직 모르면 -1")
+    currency: Literal["USD", "KRW", "unknown"] = Field(description="monthly_budget 통화. 모르면 unknown")
+    contains_personal_data: Literal["yes", "no", "unknown"] = Field(description="개인정보(이름·연락처·주소·결제정보 등) 저장·처리 여부")
+    frozen_status: Literal["unknown", "none", "listed"] = Field(
+        description="변경 금지 리소스: 아직 안 물어봄=unknown, 고객이 없다고 함=none, 있음=listed")
+    frozen_resources: list[str] = Field(description="frozen_status=listed 일 때 변경 금지 리소스 목록 (예: 'RDS prod-db MySQL 8.0 유지')")
+    goal: str = Field(description="이번 의뢰로 얻고 싶은 것 (한 문장). 모르면 빈 문자열")
+    priorities: list[str] = Field(description=f"최적화 우선순위, 다음 값만 사용: {CATEGORIES}")
+    change_tolerance: str = Field(description="변경 허용 범위: 다운타임 허용, 관리형·서버리스·Graviton 전환 가능 여부. 모르면 빈 문자열")
+    constraints: str = Field(description="기타 제약: 규제·컴플라이언스, 리전 고정, 기술 스택 제한. 모르면 빈 문자열")
+    operations: str = Field(description="운영 체계: IaC(Terraform 등), 모니터링, 배포 방식, 운영 인력. 모르면 빈 문자열")
+    security: str = Field(description="보안 요구: 데이터 민감도, 암호화, 접근 통제. 모르면 빈 문자열")
+
+    def to_profile(self) -> Profile:
+        d = self.model_dump()
+        out = {k: (v or None) for k, v in d.items() if isinstance(v, str) and k in Profile.model_fields}
+        out["monthly_budget"] = None if self.monthly_budget < 0 else self.monthly_budget
+        out["currency"] = None if self.currency == "unknown" else self.currency
+        out["contains_personal_data"] = {"yes": True, "no": False}.get(self.contains_personal_data)
+        out["frozen_resources"] = {"unknown": None, "none": []}.get(self.frozen_status, self.frozen_resources)
+        out["priorities"] = [c for c in self.priorities if c in CATEGORIES]
+        return Profile(**out)
+
+
 class Turn(BaseModel):
     reply: str = Field(description="고객에게 보낼 메시지: 직전 답변을 짧게 확인하고 다음 질문 1~2개. 마크다운 가능")
     quick_replies: list[str] = Field(description="고객이 눌러서 답할 수 있는 짧은 답변 후보 2~4개 (질문이 없으면 빈 목록)")
-    profile: Profile = Field(description="지금까지 대화와 자동 수집 정보로 채운 요구사항 프로필 (모르는 항목은 null)")
+    profile: ProfileLLM = Field(description="지금까지 대화와 자동 수집 정보로 채운 요구사항 프로필")
     ready: bool = Field(description="필수 항목이 모두 채워졌거나 고객이 바로 진단을 원하면 true")
 
 
@@ -84,6 +117,7 @@ SYSTEM_TMPL = """너는 클라우드 인프라 관리 서비스의 초기 상담
 - 필수 항목({required})을 먼저 채우고, 그다음 나머지 항목을 묻는다.
 - 월 예산은 금액과 통화를 함께 확인한다 (예: "월 예산이 있으신가요? 원화/달러 중 어느 기준인가요?"). 예산이 없다고 하면
   monthly_budget 을 0 으로 하고 다시 묻지 않는다.
+- 이미 확인된 값은 매 턴 그대로 다시 채운다 (이전 턴 프로필은 저장되지 않으므로 대화 전체에서 다시 읽어 채운다).
 - 개인정보 포함 여부는 예/아니오로 확인한다. 변경 금지 리소스는 "절대 바꾸면 안 되는 리소스(엔진·버전·네트워크 연동 등)"가
   있는지 묻고, 없다고 하면 frozen_resources 를 빈 목록 [] 으로 한다.
 - 답이 모호하면 그 항목을 한 번 더 구체적으로 묻는다. 고객이 모른다고 하면 null 로 두고 넘어간다.
@@ -140,8 +174,7 @@ class Intake:
                 "다음 상담원 응답을 만들어라.")
         t0 = time.time()
         out: Turn = self.llm.structured(system_prompt(required), user, Turn, effort="low")
-        p = out.profile
-        p.priorities = [c for c in p.priorities if c in CATEGORIES]
+        p = out.profile.to_profile()
         result = {
             "reply": out.reply,
             "quick_replies": out.quick_replies,
