@@ -110,3 +110,12 @@ def test_llm_profile_to_profile_converts_sentinels():
                     frozen_resources=["RDS prod-db MySQL 8.0"]).to_profile()
     assert (p.monthly_budget, p.currency, p.contains_personal_data, p.frozen_resources) == \
         (5_000_000, "KRW", True, ["RDS prod-db MySQL 8.0"])
+
+
+def test_company_name_is_required_first_and_mapped():
+    """고객사명: 기본 필수 항목의 첫 번째, LLM 출력의 "" → null."""
+    assert REQUIRED[0] == "company_name"
+    assert "company_name" in missing(Profile())
+    assert "company_name" not in missing(Profile(company_name="카리상사"))
+    assert llm_profile().to_profile().company_name is None
+    assert llm_profile(company_name="카리상사").to_profile().company_name == "카리상사"
