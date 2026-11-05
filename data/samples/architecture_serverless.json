@@ -1,0 +1,373 @@
+{
+ "name": "Serverless (API Gateway + Lambda + DynamoDB)",
+ "concept": "서버 없이 요청량만큼 과금되는 서버리스 구조",
+ "easy_explanation": "서버를 직접 띄우지 않고, 요청이 올 때만 함수가 실행됩니다. 사용자가 적으면 비용도 거의 들지 않습니다.",
+ "pros": [
+  "유휴 비용이 거의 없음",
+  "자동 확장",
+  "서버 패치 불필요"
+ ],
+ "cons": [
+  "콜드 스타트 지연",
+  "장시간 작업에 부적합"
+ ],
+ "migration_steps": [
+  "API 를 Lambda 함수로 분리",
+  "DB 를 DynamoDB 로 이관",
+  "CloudFront 로 정적 파일 배포"
+ ],
+ "diagram": {
+  "zones": [],
+  "tiers": [],
+  "nodes": [
+   {
+    "id": "users",
+    "icon": "users",
+    "label": "Users",
+    "role": "app.example.com",
+    "place": "outside",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "free"
+    }
+   },
+   {
+    "id": "r53",
+    "icon": "route53",
+    "label": "Amazon Route 53",
+    "role": "DNS service",
+    "place": "edge",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 1,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 10,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "route53"
+    }
+   },
+   {
+    "id": "cf",
+    "icon": "cloudfront",
+    "label": "Amazon CloudFront",
+    "role": "CDN",
+    "place": "edge",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 500,
+     "requests_million_month": 20,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "cloudfront"
+    }
+   },
+   {
+    "id": "waf",
+    "icon": "waf",
+    "label": "AWS WAF",
+    "role": "Web Application Firewall",
+    "place": "edge",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 1,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 20,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 5,
+     "kind": "waf"
+    }
+   },
+   {
+    "id": "web",
+    "icon": "s3",
+    "label": "Amazon S3",
+    "role": "Static website",
+    "place": "region",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "standard",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 20,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "s3"
+    }
+   },
+   {
+    "id": "apigw",
+    "icon": "api_gateway",
+    "label": "Amazon API Gateway",
+    "role": "HTTP API",
+    "place": "region",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "http",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 10,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "api_gateway"
+    }
+   },
+   {
+    "id": "fn",
+    "icon": "lambda",
+    "label": "AWS Lambda",
+    "role": "API handler",
+    "place": "region",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "arm",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 10,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0.5,
+     "duration_ms": 120,
+     "lcu": 0,
+     "kind": "lambda"
+    }
+   },
+   {
+    "id": "ddb",
+    "icon": "dynamodb",
+    "label": "Amazon DynamoDB",
+    "role": "Orders table",
+    "place": "region",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 25,
+     "data_gb_month": 0,
+     "requests_million_month": 30,
+     "write_requests_million_month": 5,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "dynamodb"
+    }
+   },
+   {
+    "id": "queue",
+    "icon": "sqs",
+    "label": "Amazon SQS",
+    "role": "Order events",
+    "place": "region",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 5,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "sqs"
+    }
+   },
+   {
+    "id": "worker",
+    "icon": "lambda",
+    "label": "AWS Lambda",
+    "role": "Async worker",
+    "place": "region",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "arm",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 0,
+     "data_gb_month": 0,
+     "requests_million_month": 5,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 1,
+     "duration_ms": 800,
+     "lcu": 0,
+     "kind": "lambda"
+    }
+   },
+   {
+    "id": "uploads",
+    "icon": "s3",
+    "label": "Amazon S3",
+    "role": "User uploads",
+    "place": "region",
+    "tier": "",
+    "zone": "",
+    "group": "",
+    "pricing": {
+     "spec": "standard",
+     "engine": "",
+     "multi_az": false,
+     "count": 0,
+     "hours_per_month": 730,
+     "storage_gb": 200,
+     "data_gb_month": 0,
+     "requests_million_month": 0,
+     "write_requests_million_month": 0,
+     "vcpu": 0,
+     "memory_gb": 0,
+     "duration_ms": 0,
+     "lcu": 0,
+     "kind": "s3"
+    }
+   }
+  ],
+  "groups": [],
+  "edges": [
+   {
+    "source": "users",
+    "target": "r53",
+    "label": ""
+   },
+   {
+    "source": "r53",
+    "target": "cf",
+    "label": ""
+   },
+   {
+    "source": "waf",
+    "target": "cf",
+    "label": ""
+   },
+   {
+    "source": "cf",
+    "target": "web",
+    "label": "/*"
+   },
+   {
+    "source": "cf",
+    "target": "apigw",
+    "label": "/api/*"
+   },
+   {
+    "source": "apigw",
+    "target": "fn",
+    "label": ""
+   },
+   {
+    "source": "fn",
+    "target": "ddb",
+    "label": ""
+   },
+   {
+    "source": "fn",
+    "target": "queue",
+    "label": ""
+   },
+   {
+    "source": "queue",
+    "target": "worker",
+    "label": ""
+   },
+   {
+    "source": "worker",
+    "target": "uploads",
+    "label": ""
+   },
+   {
+    "source": "worker",
+    "target": "ddb",
+    "label": ""
+   }
+  ]
+ },
+ "sources": [],
+ "bp_ids": [
+  "COST07-BP02"
+ ]
+}
