@@ -142,8 +142,10 @@ SYSTEM_RANK = COMMON + """
 
 
 def budget_usd(c: Constraints | None) -> float | None:
-    """월 예산을 USD 로. 예산 없음(0)·모름(None)이면 None."""
-    if not c or not c.monthly_budget:
+    """월 예산을 USD 로. 예산 없음(0)·모름(None)·통화 미확인이면 None (예산 검사 생략).
+
+    통화 없이 금액만 오면 원화 300만 원이 $3,000,000 으로 읽히는 식의 오판이 생기므로 추측하지 않는다."""
+    if not c or not c.monthly_budget or c.currency is None:
         return None
     return c.monthly_budget / c.krw_per_usd if c.currency == "KRW" else c.monthly_budget
 
@@ -152,9 +154,11 @@ def constraints_text(c: Constraints | None) -> str:
     if c is None:
         return ""
     lines = []
-    if c.monthly_budget:
+    if c.monthly_budget and c.currency is None:
+        lines.append(f"- 월 예산: {c.monthly_budget:,.0f} (통화 미확인 — 원화인지 달러인지 모름)")
+    elif c.monthly_budget:
         usd = budget_usd(c)
-        lines.append(f"- 월 예산: {c.monthly_budget:,.0f} {c.currency or 'USD'}"
+        lines.append(f"- 월 예산: {c.monthly_budget:,.0f} {c.currency}"
                      + (f" (약 ${usd:,.0f}, 환율 {c.krw_per_usd:,.0f}원/$)" if c.currency == "KRW" else ""))
     elif c.monthly_budget == 0:
         lines.append("- 월 예산: 정해진 상한 없음")
@@ -189,6 +193,12 @@ def region_warnings(infra: str) -> list[str]:
     if not found:
         return []
     return [f"인프라 설명에 서울 외 리전({', '.join(found)})이 있지만 비용은 서울 리전(ap-northeast-2) 가격으로 계산했습니다."]
+
+
+def constraint_warnings(c: Constraints | None) -> list[str]:
+    if c and c.monthly_budget and c.currency is None:
+        return ["월 예산의 통화(currency: USD|KRW)가 없어 예산 초과 검사를 하지 않았습니다."]
+    return []
 
 
 def _distinct(dirs: list[Direction], n: int) -> list[Direction]:
@@ -306,13 +316,24 @@ class Architect:
                     if baseline else "(계산 불가)")
         rank_user = (ctx.split("<자료>")[0] + f"<현재_월비용>{cur_line}</현재_월비용>\n\n"
                      + _block("후보", summary))
-        ranking: Ranking = self.llm.structured(SYSTEM_RANK, rank_user, Ranking, effort="medium")
+        rank_warnings = []
+        try:
+            ranking: Ranking | None = self.llm.structured(SYSTEM_RANK, rank_user, Ranking, effort="medium")
+        except Exception as e:  # noqa: BLE001 — 안은 다 만들었으니 순위만 빼고 돌려준다
+            log.exception("순위 생성 실패")
+            ranking = None
+            rank_warnings.append(f"AI 순위 생성에 실패해({classify(e).code}) 월 비용이 낮은 순으로 정렬했습니다.")
         timings["rank"] = time.time() - t0
 
-        by_index = {it.index: it for it in ranking.items if 0 <= it.index < len(cands)}
+        def priced_total(i: int) -> float:  # 계산 가능한 항목이 없으면 맨 뒤
+            c = cands[i]["cost"]
+            return c.monthly_total_usd if any(it.monthly_usd is not None for it in c.items) else float("inf")
+
+        by_index = {it.index: it for it in ranking.items if 0 <= it.index < len(cands)} if ranking else {}
         # 제약 위반 안은 모델 순위와 관계없이 위반 없는 안보다 뒤로 (보장)
-        order = sorted(range(len(cands)), key=lambda i: (bool(cands[i]["violations"]),
-                                                          by_index[i].rank if i in by_index else 99, i))
+        order = sorted(range(len(cands)), key=lambda i: (
+            bool(cands[i]["violations"]),
+            (by_index[i].rank if i in by_index else 99) if ranking else priced_total(i), i))
         architectures = []
         for rank, i in enumerate(order, 1):  # 모델이 순위를 겹치게 줘도 1..N 으로 다시 매김
             c, it = cands[i], by_index.get(i)
@@ -332,7 +353,7 @@ class Architect:
             })
         pricing = load_pricing(REGION)
         return {
-            "overall": ranking.overall,
+            "overall": ranking.overall if ranking else "",
             "current": {"monthly_usd": round(baseline, 2) if baseline else None,
                         "source": baseline_source,
                         "estimated_cost": est_cost.model_dump() if est_cost else None,
@@ -342,7 +363,7 @@ class Architect:
             "sources": source_refs(hits),
             "pricing": {"region": pricing.get("region", REGION), "built": pricing.get("built"),
                         "currency": "USD", "basis": "온디맨드, RI·Savings Plans·프리티어 미적용"},
-            "warnings": region_warnings(infra),
+            "warnings": region_warnings(infra) + constraint_warnings(constraints) + rank_warnings,
             "failed": failed,
             "timings_s": {k: round(v, 1) for k, v in timings.items()},
         }
