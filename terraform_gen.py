@@ -164,12 +164,12 @@ resource "aws_vpc" "main" {{
   enable_dns_support   = true
   enable_dns_hostnames = true
   tags = {{ Name = local.name }}
-}}
-
-resource "aws_internet_gateway" "main" {{
-  vpc_id = aws_vpc.main.id
-  tags = {{ Name = local.name }}
 }}''']
+        if self.public_tiers:  # public 서브넷이 없으면 인터넷 게이트웨이도 만들지 않는다
+            b.append('''resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+  tags = { Name = local.name }
+}''')
         for i, t in enumerate(self.d.tiers):
             b.append(f'''resource "aws_subnet" "{ident(t.id)}" {{
   for_each          = local.azs
@@ -178,7 +178,8 @@ resource "aws_internet_gateway" "main" {{
   cidr_block        = cidrsubnet(var.vpc_cidr, 8, {i * 10} + index(keys(local.azs), each.key))
   tags = {{ Name = "${{local.name}}-{dash(t.id)}-${{each.key}}", Tier = {q(t.label)} }}
 }}''')
-        b.append('''resource "aws_route_table" "public" {
+        if self.public_tiers:
+            b.append('''resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
   route {
     cidr_block = "0.0.0.0/0"
@@ -256,7 +257,8 @@ locals {{
             return
         b = []
         for n in self.d.nodes:
-            if n.pricing.kind in SG_KINDS and self.tier_of(n):
+            in_vpc_lambda = n.pricing.kind == "lambda" and n.place == "subnet"
+            if (n.pricing.kind in SG_KINDS or in_vpc_lambda) and self.tier_of(n):
                 name = ident(n.id)
                 self.sg[n.id] = f"aws_security_group.{name}.id"
                 b.append(f'''resource "aws_security_group" "{name}" {{
@@ -460,11 +462,24 @@ resource "aws_autoscaling_policy" "{name}_cpu" {{
   deletion_protection         = true
   skip_final_snapshot         = false
   final_snapshot_identifier   = "${{local.name}}-{dash(n.id)}-final"'''
+        scaling = ""
+        if p.kind == "aurora" and p.spec == "db.serverless":
+            text = f"{n.label} {n.role}".lower()
+            auto_pause = bool(re.search(r"(min\s*)?0\s*acu|auto-?pause|일시\s*정지", text))
+            pause_line = "\n    seconds_until_auto_pause = 600" if auto_pause else ""
+            scaling = f'''
+  serverlessv2_scaling_configuration {{
+    min_capacity = {0 if auto_pause else 0.5}
+    max_capacity = 4{pause_line}
+  }}'''
+            if auto_pause:
+                self.warnings.append(f"{n.label}: 0 ACU 자동 일시정지는 지원 버전(Aurora PostgreSQL 16.3+/15.7+, MySQL 3.08+)에서만 "
+                                     "동작합니다. 필요하면 engine_version 을 지정하세요.")
         if p.kind == "aurora":
             body = f'''resource "aws_rds_cluster" "{name}" {{
   cluster_identifier          = "${{local.name}}-{dash(n.id)}"
   engine                      = {q(engine)}
-{common}{self.lifecycle(n.id)}
+{common}{scaling}{self.lifecycle(n.id)}
 }}
 
 resource "aws_rds_cluster_instance" "{name}" {{
@@ -820,6 +835,37 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
 }''')
         mem = int((p.memory_gb or 0.5) * 1024)
         arch = "x86_64" if p.spec == "x86" else "arm64"
+        vpc = ""
+        if n.id in self.sg:  # private 서브넷에 둔 Lambda → VPC 연결 + ENI 권한
+            vpc = f'''
+  vpc_config {{
+    subnet_ids         = {self.subnets(n, self.tier_of(n))}
+    security_group_ids = [{self.sg[n.id]}]
+  }}
+  depends_on = [aws_iam_role_policy_attachment.lambda_vpc]'''
+            if not getattr(self, "_lambda_vpc", False):
+                self._lambda_vpc = True
+                self.blocks.append('''resource "aws_iam_role_policy_attachment" "lambda_vpc" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}''')
+        dbs = [self.nodes[t] for t in self.out_edges(n.id) if self.nodes[t].pricing.kind in ("rds", "aurora")
+               and self.nodes[t].id in self.sg]
+        if dbs:  # 연결된 DB 의 관리형 비밀번호(Secrets Manager)를 읽을 권한
+            arns = ", ".join(f"aws_{'rds_cluster' if d.pricing.kind == 'aurora' else 'db_instance'}.{ident(d.id)}"
+                             f".master_user_secret[0].secret_arn" for d in dbs)
+            self.blocks.append(f'''data "aws_iam_policy_document" "{name}_db_secret" {{
+  statement {{
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [{arns}]
+  }}
+}}
+
+resource "aws_iam_role_policy" "{name}_db_secret" {{
+  name_prefix = "db-secret-"
+  role        = aws_iam_role.lambda.id
+  policy      = data.aws_iam_policy_document.{name}_db_secret.json
+}}''')
         self.blocks.append(f'''# TODO: var.lambda_package 에 배포 패키지(zip) 경로, handler 를 실제 코드에 맞게
 resource "aws_lambda_function" "{name}" {{
   function_name = "${{local.name}}-{dash(n.id)}"
@@ -829,7 +875,7 @@ resource "aws_lambda_function" "{name}" {{
   filename      = var.lambda_package
   architectures = ["{arch}"]
   memory_size   = {min(max(mem, 128), 10240)}
-  timeout       = 30
+  timeout       = 30{vpc}
 }}''')
         self.warnings.append(f"{n.label}: Lambda 코드 패키지(var.lambda_package)와 handler 를 채워야 apply 할 수 있습니다.")
 
@@ -936,6 +982,11 @@ resource "aws_dynamodb_table" "{name}" {{
         if n.pricing.kind == "vpc_interface_endpoint":
             tier = self.tier_of(n)
             self.vars.add("interface_endpoint_services")
+            guess = {r"secret": ["secretsmanager"], r"로그|\blogs?\b": ["logs"], r"\becr\b": ["ecr.api", "ecr.dkr"],
+                     r"\bssm\b": ["ssm"], r"\bsts\b": ["sts"], r"\bkms\b": ["kms"], r"\bsqs\b": ["sqs"],
+                     r"모니터링|\bmonitoring\b": ["monitoring"]}
+            self.endpoint_services = list(dict.fromkeys(
+                s for pat, v in guess.items() if re.search(pat, text, re.A) for s in v))
             self.blocks.append(f'''# 인터페이스 엔드포인트: var.interface_endpoint_services 에 서비스 이름을 넣으면 생성 (예: ["ecr.api", "ecr.dkr", "logs"])
 resource "aws_vpc_endpoint" "{name}" {{
   for_each            = toset(var.interface_endpoint_services)
@@ -946,11 +997,13 @@ resource "aws_vpc_endpoint" "{name}" {{
   subnet_ids          = [for s in aws_subnet.{ident(tier)} : s.id]
   security_group_ids  = [{self.sg[n.id]}]
 }}''')
-            self.warnings.append(f"{n.label}: 인터페이스 엔드포인트 대상 서비스를 var.interface_endpoint_services 에 채우세요.")
+            if not self.endpoint_services:
+                self.warnings.append(f"{n.label}: 인터페이스 엔드포인트 대상 서비스를 var.interface_endpoint_services 에 채우세요.")
             return
         svc = "dynamodb" if "dynamo" in text else "s3"
-        rts = ["aws_route_table.public.id"] + (["values(aws_route_table.private)[*].id"] if self.private_tiers else [])
-        rt = rts[0] if len(rts) == 1 else f"concat([{rts[0]}], {rts[1]})"
+        pub = ["aws_route_table.public.id"] if self.public_tiers else []
+        priv = "values(aws_route_table.private)[*].id" if self.private_tiers else ""
+        rt = f"concat([{pub[0]}], {priv})" if pub and priv else (f"[{pub[0]}]" if pub else priv)
         self.blocks.append(f'''resource "aws_vpc_endpoint" "{name}" {{
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${{var.region}}.{svc}"
@@ -1046,7 +1099,7 @@ provider "aws" {{
             "container_image": ('string', '"public.ecr.aws/nginx/nginx:stable"', "Fargate 컨테이너 이미지"),
             "lambda_package": ('string', '"lambda.zip"', "Lambda 배포 패키지 zip 경로"),
             "lambda_runtime": ('string', '"python3.12"', "Lambda 런타임"),
-            "interface_endpoint_services": ('list(string)', "[]", "인터페이스 VPC 엔드포인트 서비스 (예: [\"ecr.api\", \"logs\"])"),
+            "interface_endpoint_services": ('list(string)', json.dumps(getattr(self, "endpoint_services", [])), "인터페이스 VPC 엔드포인트 서비스 (예: [\"ecr.api\", \"logs\"])"),
         }
         variables = "\n\n".join(f'''variable "{k}" {{
   description = {q(var_defs[k][2])}
@@ -1065,7 +1118,7 @@ terraform apply
 ```
 
 - 사양(인스턴스 타입·대수·엔진·Multi-AZ·스토리지)은 추천 결과의 비용 계산과 같은 값입니다
-- 보안 기본값: 저장 암호화, S3 퍼블릭 차단, IMDSv2, RDS 비밀번호는 Secrets Manager 자동 관리
+- 보안 기본값: 저장 암호화, S3 퍼블릭 차단{", IMDSv2" if self.amis else ""}, RDS 비밀번호는 Secrets Manager 자동 관리
 - RDS/Aurora 는 deletion_protection 이 켜져 있습니다
 - 사람이 채워야 할 항목:
 ''' + ("\n".join(f"  - {w}" for w in self.warnings) or "  - 없음") + "\n"

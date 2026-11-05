@@ -96,3 +96,53 @@ def test_terraform_fmt_and_validate(sample, tmp_path):
         pytest.skip("terraform init 실패 (네트워크): " + init.stderr[-200:])
     val = run("validate", "-no-color")
     assert val.returncode == 0, val.stdout + val.stderr
+
+
+def _serverless_aurora_diagram():
+    from schemas import Diagram
+    z = dict(spec="", engine="", multi_az=False, count=1, hours_per_month=730, storage_gb=0, data_gb_month=0,
+             requests_million_month=0, write_requests_million_month=0, vcpu=0, memory_gb=0, duration_ms=0, lcu=0)
+    node = lambda id, icon, place, tier="", zone="", role="", **p: {  # noqa: E731
+        "id": id, "icon": icon, "label": id, "role": role, "place": place, "tier": tier, "zone": zone, "group": "",
+        "pricing": {**z, **p}}
+    return Diagram.model_validate({
+        "zones": ["AZ1", "AZ2"],
+        "tiers": [{"id": "app", "label": "App", "kind": "private"}, {"id": "db", "label": "DB", "kind": "private"}],
+        "nodes": [node("apigw", "api_gateway", "region", kind="api_gateway"),
+                  node("fn", "lambda", "subnet", "app", "each", kind="lambda", memory_gb=0.5),
+                  node("vpce", "vpc_endpoint", "subnet", "app", "each", role="Secrets Manager·Logs 사설 접근",
+                       kind="vpc_interface_endpoint"),
+                  node("aurora", "aurora", "subnet", "db", "AZ1", role="Writer (min 0 ACU auto-pause)",
+                       kind="aurora", spec="db.serverless", engine="Aurora PostgreSQL")],
+        "groups": [],
+        "edges": [{"source": "apigw", "target": "fn", "label": ""}, {"source": "fn", "target": "aurora", "label": ""},
+                  {"source": "fn", "target": "vpce", "label": ""}]})
+
+
+def test_serverless_aurora_and_vpc_lambda():
+    """서버리스 + VPC Lambda: Aurora 용량 설정, Lambda VPC 연결·권한, 보안 그룹 규칙, 엔드포인트 추론, IGW 없음."""
+    files = generate(_serverless_aurora_diagram(), "svl")["files"]
+    main, var = files["main.tf"], files["variables.tf"]
+    assert "serverlessv2_scaling_configuration" in main and re.search(r"min_capacity\s+= 0\n", main)
+    assert "seconds_until_auto_pause" in main
+    assert "vpc_config" in main and "AWSLambdaVPCAccessExecutionRole" in main
+    assert 'resource "aws_vpc_security_group_ingress_rule" "aurora_from_fn"' in main
+    assert 'resource "aws_vpc_security_group_ingress_rule" "vpce_from_fn"' in main
+    assert "secretsmanager:GetSecretValue" in main and "master_user_secret[0].secret_arn" in main
+    assert '["secretsmanager", "logs"]' in var        # "secrets" 안의 "ecr" 로 ECR 을 추측하지 않음
+    assert "aws_internet_gateway" not in main          # public 서브넷이 없으면 IGW 도 없음
+    assert "IMDSv2" not in files["README.md"]          # EC2 가 없으면 IMDSv2 안내도 없음
+
+
+@pytest.mark.skipif(not TF, reason="terraform CLI 없음 (TERRAFORM_BIN 으로 지정 가능)")
+def test_serverless_aurora_validates(tmp_path):
+    for name, text in generate(_serverless_aurora_diagram(), "svl")["files"].items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    env = {**os.environ, "TF_PLUGIN_CACHE_DIR": os.environ.get("TF_PLUGIN_CACHE_DIR", str(Path.home() / ".terraform.d" / "plugin-cache"))}
+    Path(env["TF_PLUGIN_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
+    run = lambda *a: subprocess.run([TF, *a], cwd=tmp_path, env=env, capture_output=True, text=True)  # noqa: E731
+    assert run("fmt", "-check", "-diff").returncode == 0
+    if run("init", "-backend=false", "-input=false").returncode != 0:
+        pytest.skip("terraform init 실패 (네트워크)")
+    v = run("validate", "-no-color")
+    assert v.returncode == 0, v.stdout + v.stderr
