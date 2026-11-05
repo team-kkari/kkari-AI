@@ -64,8 +64,9 @@ class FakeLLM:
         self.stream = list(stream if stream is not None else ["안녕", "하세요"])
         self.calls: list[type] = []
 
-    def structured(self, system, user, schema, effort="high"):
+    def structured(self, system, user, schema, effort="high", attachments=None):
         self.calls.append(schema)
+        self.attachments = attachments
         if schema not in self.responses:
             raise AssertionError(f"FakeLLM: {schema.__name__} 응답이 정해지지 않음")
         r = self.responses[schema]

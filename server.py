@@ -10,6 +10,8 @@
     POST /recommend      인프라 정보 → 개선안 목록(JSON) + 출처
     POST /chat           챗봇 — NDJSON 스트리밍 (sources → delta… → done)
     POST /terraform      추천 아키텍처 하나(diagram) → Terraform 초안 파일 (AI 호출 없음, 즉시)
+    POST /consult/files  고객창구: (선택) 운영 중인 인프라 파일 업로드 → file_analysis
+    POST /consult        고객창구: 비전공자용 상담 — 쉬운 질문 하나씩, 파일이 있으면 질문이 줄어듦
 
 에러는 모두 {"code", "message", "retryable"} (errors.py 참고).
 
@@ -27,7 +29,7 @@ from typing import Literal
 import os
 import threading
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -35,6 +37,8 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from architect import Architect, constraints_text
+from consult import MAX_BYTES, MAX_FILES, Consult, analyze_files
+from consult import WARMUP as CONSULT_WARMUP
 from errors import ApiError, classify, invalid
 from generator import RAG, source_refs
 from intake import FIELDS, WARMUP, Intake
@@ -97,6 +101,11 @@ def _warmup():
         log.info("[warmup] /intake 준비 완료")
     except Exception as e:  # noqa: BLE001 — 워밍업 실패는 서비스에 영향 없음
         log.warning("[warmup] /intake 건너뜀: %s", type(e).__name__)
+    try:
+        Consult(rag.llm).turn([], None, session_id=CONSULT_WARMUP)
+        log.info("[warmup] /consult 준비 완료")
+    except Exception as e:  # noqa: BLE001
+        log.warning("[warmup] /consult 건너뜀: %s", type(e).__name__)
     try:  # /architectures 스키마도 미리 컴파일 (첫 요청이 수 분 걸리는 것 방지)
         Architect(rag, n=1).run("EC2 t4g.small 1대", "워밍업", [])
         log.info("[warmup] /architectures 준비 완료")
@@ -136,6 +145,13 @@ class TerraformReq(BaseModel):
     constraints: Constraints | None = Field(None, description="고객 제약 — 개인정보·변경 금지 리소스 반영")
     format: Literal["json", "zip", "tf"] = Field(
         "json", description="json: 파일별 내용을 JSON 으로, zip: 압축 파일, tf: 전체를 합친 <프로젝트>.tf 파일 하나")
+
+
+class ConsultReq(BaseModel):
+    history: list[dict] = Field(default_factory=list,
+                                description='지금까지 대화 [{"role":"assistant"|"user","content":"..."}]. 첫 턴은 빈 목록')
+    file_analysis: dict | None = Field(None, description="POST /consult/files 응답의 file_analysis 그대로 (파일을 안 올렸으면 null)")
+    session_id: str | None = Field(None, description="상담 세션 ID (백엔드에서 생성)")
 
 
 class ChatReq(BaseModel):
@@ -298,3 +314,28 @@ def terraform(req: TerraformReq):
             z.writestr(f"terraform/{path}", text)
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{out["project"]}-terraform.zip"'})
+
+
+@app.post("/consult/files")
+async def consult_files(files: list[UploadFile] = File(..., description="Terraform·CloudFormation·YAML·비용 CSV·구성도 이미지·PDF 등")):
+    """고객창구 파일 업로드 (선택). 비밀값(키·비밀번호)은 분석 전에 지운다. 응답의 file_analysis 를 /consult 에 넘긴다."""
+    if len(files) > MAX_FILES * 2:
+        raise invalid(f"파일은 한 번에 최대 {MAX_FILES}개까지 올려 주세요")
+    data = []
+    for f in files:
+        raw = await f.read(MAX_BYTES + 1)  # 한도 + 1 바이트만 읽어 초과 여부 판단
+        data.append((f.filename or "file", raw))
+
+    def run():
+        try:
+            return {"file_analysis": analyze_files(rag.llm, data)}
+        except ValueError as e:
+            raise invalid(str(e)) from e
+    return _call_llm(run)
+
+
+@app.post("/consult")
+def consult(req: ConsultReq):
+    """고객창구 상담 한 턴. 응답 question 에 프론트가 그릴 질문 정보(id, input 종류, options) 가 들어 있다."""
+    _check_history(req.history)
+    return _call_llm(lambda: Consult(rag.llm).turn(req.history, req.file_analysis, req.session_id))

@@ -5,3 +5,4 @@ data/collect.log
 .env
 models/
 data/intake_logs/
+data/consult_logs/
