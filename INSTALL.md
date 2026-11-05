@@ -222,6 +222,21 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 - 비용은 `data/pricing/ap-northeast-2.json`(AWS 공식 Price List) 로 코드가 계산한다 — AI 가 가격을 쓰지 않는다. 가격표 갱신: `uv run python build_pricing.py`
 - 1~3분 걸린다 (아키텍처 5개를 병렬 생성 후 순위 비교). 프론트에 로딩 화면 필요
 
+### `POST /terraform` — 추천 아키텍처 → Terraform 초안 (즉시, AI 호출 없음)
+
+`/architectures` 응답의 `architectures[i]` 를 그대로 보내면 된다 (`name`, `diagram` 사용). 선택: `constraints`, `format`(`json`|`zip`).
+
+```json
+{ "name": "Graviton ASG + RDS Multi-AZ", "diagram": { ... }, "constraints": { "frozen_resources": ["RDS prod-db"] }, "format": "json" }
+```
+
+- `json` 응답: `{ "project", "files": {"versions.tf", "variables.tf", "main.tf", "outputs.tf", "README.md"}, "warnings": [...] }`
+- `zip` 응답: `terraform/*.tf` 가 든 압축 파일 다운로드
+- 사양(인스턴스 타입·대수·엔진·Multi-AZ·스토리지)은 diagram 그대로 = 비용 계산과 같은 값. VPC·서브넷·NAT·보안 그룹(연결선대로)·ALB·ASG·RDS/Aurora·ElastiCache·S3·EFS·CloudFront·WAF·Fargate·Lambda·SQS·DynamoDB 등 변환
+- 보안 기본값: 저장 암호화, S3 퍼블릭 차단, IMDSv2, RDS 비밀번호 Secrets Manager 자동 관리, deletion_protection
+- 변경 금지 리소스는 `prevent_destroy` + `terraform import` 안내 주석. 자동 적용(apply)은 하지 않는다
+- 변환 못 한 노드·사람이 채울 값(도메인, Lambda 코드 등)은 `warnings` 와 README.md 에
+
 ### `POST /chat` — 챗봇 (NDJSON 스트리밍)
 
 ```json
