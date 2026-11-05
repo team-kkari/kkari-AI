@@ -97,6 +97,8 @@ uv run uvicorn server:app --host 0.0.0.0 --port 8000
 
 ## API 요약 (백엔드 연동용)
 
+> 필드별 타입·에러 코드·타임아웃 등 전체 명세는 **[docs/API.md](docs/API.md)** 참고.
+
 ### `POST /search` — 근거 자료 검색만 (API 키 불필요)
 
 ```json
